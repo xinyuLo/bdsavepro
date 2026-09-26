@@ -63,17 +63,23 @@ jobs:
         id: lists
         run: |
           GHCR_NAME=$(echo "${{ github.repository_owner }}/bdsavepro" | tr '[:upper:]' '[:lower:]')
+          # 注意：这个 block 的内容会被 docker/metadata-action 逐行当作镜像名，
+          # 所以只能写镜像地址，任何人类可读的提示语都必须放在 block 外面。
           {
             echo "images<<__EOF__"
             echo "${REGISTRY}/${GHCR_NAME}"
             if [ -n "${DOCKERHUB_TOKEN}" ]; then
               echo "docker.io/${DOCKERHUB_USERNAME}/bdsavepro"
-              echo "  将同时推送到 Docker Hub: ${DOCKERHUB_USERNAME}/bdsavepro"
-            else
-              echo "  （未配置 DOCKERHUB_TOKEN，仅推送 GHCR）"
             fi
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
+          echo "本次构建将推送的镜像："
+          echo "  - ${REGISTRY}/${GHCR_NAME}"
+          if [ -n "${DOCKERHUB_TOKEN}" ]; then
+            echo "  - docker.io/${DOCKERHUB_USERNAME}/bdsavepro"
+          else
+            echo "  （未配置 DOCKERHUB_TOKEN，跳过 Docker Hub）"
+          fi
 
       - name: Set up QEMU
         if: contains(steps.cfg.outputs.platforms, 'arm64')
