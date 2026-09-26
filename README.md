@@ -49,9 +49,19 @@
 | **MD5 去重** | 除了文件名，还会比对 MD5。**你在网盘里改了文件名也不会重复转存** |
 | **转存日志** | 每次执行留档（存 SQLite），可查统计、排除清单、命中文件、当时的配置 |
 | **执行监控增强** | 执行过程实时显示排除文件、分级日志、各阶段数量 |
-| **QMediaSync 联动** | 转存到新文件后自动触发 QMS 的刮削任务，支持手动触发与触发日志 |
+| **QMediaSync 联动** | 转存到新文件后自动触发 QMS 刮削；轮询刮削结果（成功/失败），成功后自动触发 STRM 生成 |
+| **连接管理** | 本工具任务 ↔ QMS 刮削目录（可再绑 STRM 同步目录）一对一连接，支持新增 / 编辑 / 启停 / 单条触发 / 触发日志 |
 
 ## 快速开始
+
+### 镜像地址（二选一，内容完全一致）
+
+| 仓库 | 地址 | 说明 |
+|---|---|---|
+| Docker Hub | `7yueyue/bdsavepro:latest` | 国内拉取相对快，无需登录 |
+| GHCR | `ghcr.io/xinyulo/bdsavepro:latest` | GitHub 容器仓库，同样可匿名拉取 |
+
+下面示例里用哪个都行，把 `image:` 那行换掉即可。
 
 ### 用 docker-compose 部署（推荐）
 
@@ -60,7 +70,8 @@
 ```yaml
 services:
   bdsavepro:
-    image: ghcr.io/xinyulo/bdsavepro:latest
+    # 也可以换成 ghcr.io/xinyulo/bdsavepro:latest
+    image: 7yueyue/bdsavepro:latest
     container_name: bdsavepro
     restart: unless-stopped
     ports:
@@ -95,8 +106,10 @@ docker run -d \
   -v $(pwd)/config:/app/config \
   -v $(pwd)/log:/app/log \
   -e TZ=Asia/Shanghai \
-  ghcr.io/xinyulo/bdsavepro:latest
+  7yueyue/bdsavepro:latest
 ```
+
+> 想用 GHCR 就把最后一行的镜像名换成 `ghcr.io/xinyulo/bdsavepro:latest`。
 
 ### 目录结构
 
@@ -442,11 +455,25 @@ docker run -d --name bdsavepro -p 5000:5000 \
 
 仓库带了一套 GitHub Actions（`.github/workflows/docker-build.yml`）：
 
-- 推送到 `main` 分支时自动构建并推送到 GHCR
+- 推送到 `main` 分支时自动构建，**同时推送 GHCR 与 Docker Hub**
 - 也可以在 Actions 页面手动触发，可选是否构建 arm64
-- 镜像地址：`ghcr.io/xinyulo/bdsavepro`
+- 镜像地址：`ghcr.io/xinyulo/bdsavepro`、`7yueyue/bdsavepro`
+- 标签规则：`latest`（默认分支）、`v<版本号>`（读 `frontend/package.json`）、`sha-<短提交>`
+
+> fork 本仓库后如果没配置 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` 两个 secret，
+> 构建会**自动只推 GHCR**，不会失败。
 
 ## 更新日志
+
+### QMS 联动增强（未发版，随 v2.0.0 镜像滚动更新）
+
+- 转存到新文件后**延迟 10 秒**再触发 QMS 刮削，给 QMS 留出扫描时间
+- 触发后**自动轮询刮削结果**（每 15 秒，最多 10 分钟），成功记 `renamed`、失败带出原因
+- **刮削成功后延迟 10 秒自动触发 STRM 生成**，形成「转存 → 刮削 → 出 STRM」闭环
+- 连接列表支持**编辑**，可为连接绑定 STRM 同步目录
+- 触发过程增加 loading 与状态提示，触发日志区分「自动 / 手动」来源并记录刮削与 STRM 结果
+- 新增 QMS 接口依赖：`GET /api/sync/path-list`、`POST /api/sync/path/start`
+- 设置页版本信息改版；移除「检查更新」
 
 ### v2.0.0（本衍生版本）
 
