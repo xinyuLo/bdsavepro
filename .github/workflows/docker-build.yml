@@ -19,7 +19,7 @@ on:
           - linux/amd64,linux/arm64
         default: linux/amd64
       push_image:
-        description: '构建完成后推送到 GHCR'
+        description: '构建完成后推送镜像'
         type: boolean
         default: true
 
@@ -32,35 +32,48 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # 未配置 Docker Hub 凭据时，只推 GHCR（fork 本仓库的人不会因此构建失败）
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 计算镜像名（GHCR 要求全小写）
-        id: img
+      - name: 决定目标架构与是否推送
+        id: cfg
         run: |
-          NAME=$(echo "${{ github.repository_owner }}/bdsavepro" | tr '[:upper:]' '[:lower:]')
-          echo "name=$NAME" >> $GITHUB_OUTPUT
-          echo "镜像名: $NAME"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "platforms=${{ inputs.platforms }}" >> "$GITHUB_OUTPUT"
+            echo "push=${{ inputs.push_image }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: 读取前端版本号
         id: ver
         run: |
           VERSION=$(jq -r '.version' frontend/package.json)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "版本: $VERSION"
 
-      - name: 决定目标架构与是否推送
-        id: cfg
+      - name: 生成目标镜像地址列表
+        id: lists
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "platforms=${{ inputs.platforms }}" >> $GITHUB_OUTPUT
-            echo "push=${{ inputs.push_image }}" >> $GITHUB_OUTPUT
-          else
-            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
-          fi
+          GHCR_NAME=$(echo "${{ github.repository_owner }}/bdsavepro" | tr '[:upper:]' '[:lower:]')
+          {
+            echo "images<<__EOF__"
+            echo "${REGISTRY}/${GHCR_NAME}"
+            if [ -n "${DOCKERHUB_TOKEN}" ]; then
+              echo "docker.io/${DOCKERHUB_USERNAME}/bdsavepro"
+              echo "  将同时推送到 Docker Hub: ${DOCKERHUB_USERNAME}/bdsavepro"
+            else
+              echo "  （未配置 DOCKERHUB_TOKEN，仅推送 GHCR）"
+            fi
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         if: contains(steps.cfg.outputs.platforms, 'arm64')
@@ -77,11 +90,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: 登录 Docker Hub
+        if: steps.cfg.outputs.push == 'true' && env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
       - name: 生成镜像标签
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
+          images: ${{ steps.lists.outputs.images }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=v${{ steps.ver.outputs.version }}
