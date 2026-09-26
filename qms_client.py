@@ -27,8 +27,10 @@ TRIGGER_DELAY_SECONDS = 10
 # 刮削成功后再等多久触发 STRM 同步
 STRM_DELAY_SECONDS = 10
 # 轮询刮削结果的上限与间隔
-SCRAPE_WAIT_TIMEOUT = 600
-SCRAPE_POLL_INTERVAL = 15
+SCRAPE_WAIT_TIMEOUT = 300
+SCRAPE_POLL_INTERVAL = 5
+# 任务跑完后稍等片刻再取逐文件记录，避免刚结束还没落库
+SCRAPE_RECORDS_GRACE = 5
 
 QMS_KEY = 'qms'
 
@@ -324,6 +326,25 @@ class QmsClient:
         payload = data.get('data') or {}
         return (payload.get('list') or []) if isinstance(payload, dict) else (payload or [])
 
+    def scrape_path_detail(self, qms_id):
+        """读单个刮削任务的运行状态。
+
+        updated_at 是"上次执行完成时刻"（实测：任务跑完会前进到完成时刻），
+        is_running / is_scraping 表示当前是否在处理。
+        """
+        data = self._request('get', '/scrape/pathes/%d' % int(qms_id))
+        if data.get('code') != 200:
+            raise QmsError(data.get('message') or '获取刮削任务详情失败')
+        d = data.get('data') or {}
+        return {
+            'id': d.get('id'),
+            'is_running': bool(d.get('is_running')),
+            'is_scraping': bool(d.get('is_scraping')),
+            'updated_at': _to_int(d.get('updated_at')),
+            'source_path': d.get('source_path') or '',
+            'dest_path': d.get('dest_path') or '',
+        }
+
     def start(self, ids=None):
         """触发刮削"""
         ids = [int(i) for i in (ids or [])]
@@ -354,6 +375,13 @@ class QmsClient:
         }
 
 
+def _to_int(v):
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def build_summary(results):
     ok_ids = [r['id'] for r in results if r.get('ok')]
     fails = [r for r in results if not r.get('ok')]
@@ -379,53 +407,88 @@ def _scan_source_paths(cfg, qms_ids):
 
 
 def wait_scrape_result(cfg, qms_ids, since_ts, timeout=SCRAPE_WAIT_TIMEOUT,
-                       interval=SCRAPE_POLL_INTERVAL, quiet_rounds=2):
-    """轮询刮削记录，直到这批任务处理完（连续 quiet_rounds 轮无新记录）或超时。
+                       interval=SCRAPE_POLL_INTERVAL):
+    """等这批刮削任务跑完，再统计逐文件结果。
 
-    返回 dict: done / ok / success / failed / skipped / files / detail
+    实测 QMS 行为：
+    - GET /api/scrape/pathes/{id} → updated_at（上次执行完成时刻）、is_running
+    - GET /api/scrape/records → 逐文件记录（status=renamed 为成功）
+    - QMS 对"已在数据库中"的文件直接跳过（日志：已在数据库中，跳过），
+      此时任务成功但**不会产生任何新记录**
+
+    所以分两步：先等任务跑完（可靠），再数本次产生了哪些记录（用来报数量）。
+    返回 dict: done / ok / success / failed / files / no_new / detail
     """
-    source_paths = _scan_source_paths(cfg, qms_ids)
+    ids = [int(i) for i in qms_ids]
+    source_paths = _scan_source_paths(cfg, ids)
+    client = QmsClient(cfg)
     deadline = time.time() + timeout
-    seen = {}
-    quiet = 0
-    first = True
+    finished = set()
+    last = {}
+
     while True:
-        if not first and time.time() >= deadline:
+        for qid in ids:
+            if qid in finished:
+                continue
+            try:
+                d = client.scrape_path_detail(qid)
+            except Exception as e:  # noqa: BLE001
+                return {'done': False, 'ok': False, 'success': 0, 'failed': 0,
+                        'detail': '查询刮削任务状态失败：%s' % e, 'files': []}
+            last[qid] = d
+            # 不在运行中，且上次执行时刻晚于我们的触发时刻 → 本次跑完了
+            if (not d['is_running'] and not d['is_scraping']
+                    and d['updated_at'] >= int(since_ts)):
+                finished.add(qid)
+        if len(finished) >= len(ids):
             break
-        first = False
-        try:
-            records = QmsClient(cfg).scrape_records(page=1, page_size=100)
-        except Exception as e:  # noqa: BLE001
-            return {'done': False, 'ok': False, 'success': 0, 'failed': 0,
-                    'detail': '轮询刮削结果失败：%s' % e, 'files': []}
-        fresh = 0
-        for r in records:
-            rid = r.get('id')
-            if rid in seen:
-                continue
-            ts = int(r.get('scraped_at') or r.get('updated_at') or r.get('created_at') or 0)
-            if ts < int(since_ts):
-                continue
-            path = r.get('source_full_path') or r.get('path') or ''
-            if source_paths and not any(path.startswith(sp) for sp in source_paths):
-                continue
-            seen[rid] = r
-            fresh += 1
-        if fresh:
-            quiet = 0
-        else:
-            quiet += 1
-            # 已经收到过记录，且连续几轮没有新记录 → 认为处理完了
-            if seen and quiet >= quiet_rounds:
-                break
-            # 一条都没收到时不要过早放弃，等满 timeout
         if time.time() >= deadline:
             break
         time.sleep(interval)
 
-    success, failed, files = 0, 0, []
-    fails_detail = []
-    for r in seen.values():
+    if len(finished) < len(ids):
+        waiting = [i for i in ids if i not in finished]
+        state = []
+        for i in waiting:
+            d = last.get(i) or {}
+            where = '处理中' if (d.get('is_running') or d.get('is_scraping')) else '未开始'
+            state.append('#%s(%s)' % (i, where))
+        return {'done': False, 'ok': False, 'success': 0, 'failed': 0, 'files': [],
+                'detail': '等待 %d 秒仍未确认刮削完成：%s — QMS 可能较忙，'
+                          '可稍后在 QMS 界面查看结果' % (timeout, '、'.join(state))}
+
+    # ---- 任务已跑完，统计本次产生的逐文件记录 ----
+    records = []
+    for attempt in range(2):
+        try:
+            records = client.scrape_records(page=1, page_size=100)
+        except Exception:  # noqa: BLE001
+            records = []
+        matched = 0
+        for r in records:
+            path = r.get('source_full_path') or r.get('path') or ''
+            if source_paths and not any(path.startswith(sp) for sp in source_paths):
+                continue
+            ts = 0
+            for k in ('scraped_at', 'renamed_at', 'updated_at', 'created_at'):
+                ts = max(ts, _to_int(r.get(k)))
+            if ts >= int(since_ts):
+                matched += 1
+        if matched:
+            break
+        if attempt == 0:
+            time.sleep(SCRAPE_RECORDS_GRACE)
+
+    success, failed, files, fails_detail = 0, 0, [], []
+    for r in records:
+        path = r.get('source_full_path') or r.get('path') or ''
+        if source_paths and not any(path.startswith(sp) for sp in source_paths):
+            continue
+        ts = 0
+        for k in ('scraped_at', 'renamed_at', 'updated_at', 'created_at'):
+            ts = max(ts, _to_int(r.get(k)))
+        if ts < int(since_ts):
+            continue
         fname = r.get('file_name') or ''
         reason = (r.get('failed_reason') or '').strip()
         status = (r.get('status') or '').strip()
@@ -433,17 +496,16 @@ def wait_scrape_result(cfg, qms_ids, since_ts, timeout=SCRAPE_WAIT_TIMEOUT,
             failed += 1
             if reason:
                 fails_detail.append('%s（%s）' % (fname, reason))
-        elif status in ('renamed', 'scraped', 'renaming'):
-            success += 1
-            files.append(fname)
         else:
             success += 1
             files.append(fname)
 
-    if not seen:
-        return {'done': False, 'ok': False, 'success': 0, 'failed': 0,
-                'detail': '等待 %d 秒仍未看到刮削记录（可能还要更久，或该目录没有新文件）' % timeout,
-                'files': []}
+    if success == 0 and failed == 0:
+        # 任务成功执行，但 QMS 认为目录里没有需要处理的新文件
+        return {'done': True, 'ok': True, 'success': 0, 'failed': 0, 'files': [],
+                'no_new': True,
+                'detail': '刮削任务已执行完成：本次没有需要处理的新文件'
+                          '（这些文件此前已刮削过，QMS 会直接跳过）'}
 
     if failed:
         detail = '刮削完成：成功 %d 个，失败 %d 个' % (success, failed)
@@ -476,7 +538,7 @@ def trigger_strm(link, log_id=None, source='auto'):
 
 
 def _follow_up(link, log_id, qms_ids, since_ts):
-    """后台线程：轮询刮削结果 → 成功后延迟触发 STRM 同步 → 回写日志"""
+    """后台线程：等刮削结果 → 有实际处理过文件才触发 STRM → 回写日志"""
     cfg = load_cfg()
     if not normalize_config(cfg)['watch_result']:
         return
@@ -487,7 +549,9 @@ def _follow_up(link, log_id, qms_ids, since_ts):
         pass
     if not result.get('done') or not result.get('ok'):
         return
-    # 刮削成功 → 等一会让文件落稳，再触发 STRM
+    # "本次没有新文件" 不触发 STRM：没有新处理的文件，就没有新 STRM 要生成
+    if not result.get('success'):
+        return
     if not str(link.get('strm_id') or '').isdigit():
         return
     time.sleep(STRM_DELAY_SECONDS)
