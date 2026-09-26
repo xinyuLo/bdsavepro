@@ -231,47 +231,43 @@
     </el-card>
 
     <!-- 触发日志 -->
-    <el-dialog v-model="logsVisible" :title="`触发日志 - ${logsTitle}`" width="820px" append-to-body>
+    <el-dialog v-model="logsVisible" :title="`触发日志 · ${logsTitle}`" width="560px" append-to-body>
       <div class="logs-toolbar">
-        <span class="form-help-inline">
-          只保留最近 30 条。触发后会自动轮询 QMS，刮削结果写在「刮削结果」列。
-        </span>
+        <span class="form-help-inline">每条连接保留最近 30 条，结果由后台自动回写</span>
         <el-button size="small" :loading="logsLoading" @click="loadLogs(logsLinkId)">刷新</el-button>
       </div>
       <el-empty v-if="!logsLoading && qmsLogs.length === 0" description="还没有触发记录" :image-size="70" />
-      <el-table v-else :data="qmsLogs" size="small" style="width: 100%">
-        <el-table-column label="时间" width="150">
-          <template #default="{ row }">{{ row.trigger_at }}</template>
-        </el-table-column>
-        <el-table-column label="来源" width="70" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.source === 'auto' ? 'primary' : 'info'" effect="light">
+      <div v-else class="log-cards">
+        <div v-for="row in qmsLogs" :key="row.id || row.trigger_at" class="log-card">
+          <div class="log-head">
+            <span class="log-dot" :class="row.success ? 'ok' : 'bad'"></span>
+            <span class="log-status" :class="row.success ? 'ok-text' : 'fail-text'">
+              {{ row.success ? '触发成功' : '触发失败' }}
+            </span>
+            <span class="log-time">{{ row.trigger_at }}</span>
+            <el-tag size="small" :type="row.source === 'auto' ? 'primary' : 'info'" effect="plain">
               {{ row.source === 'auto' ? '自动' : '手动' }}
             </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="触发结果" width="80" align="center">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.success ? 'success' : 'danger'" effect="light">
-              {{ row.success ? '成功' : '失败' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="刮削结果" min-width="230">
-          <template #default="{ row }">
-            <span v-if="row.scrape_result" :class="row.scrape_result.includes('失败') && !row.scrape_result.includes('失败 0') ? 'fail-text' : 'ok-text'">
-              {{ row.scrape_result }}
-            </span>
+          </div>
+          <div class="log-targets">
+            <span class="tgt">刮削 #{{ row.qms_id }}</span>
+            <span v-if="strmIdOf(row)" class="tgt strm">STRM #{{ strmIdOf(row) }}</span>
+          </div>
+          <div class="log-line">
+            <span class="lbl">刮削</span>
+            <span v-if="row.scrape_result" :class="scrapeClass(row.scrape_result)">{{ row.scrape_result }}</span>
             <span v-else class="muted">等待中…</span>
-            <div v-if="row.strm_result" class="cell-sub">{{ row.strm_result }}</div>
-          </template>
-        </el-table-column>
-        <el-table-column label="说明" min-width="180">
-          <template #default="{ row }">
-            <span class="muted">{{ row.message || '-' }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
+          </div>
+          <div v-if="row.strm_result" class="log-line">
+            <span class="lbl">STRM</span>
+            <span class="sub-text">{{ shortStrm(row.strm_result) }}</span>
+          </div>
+          <div v-if="!row.success && row.message" class="log-line">
+            <span class="lbl">原因</span>
+            <span class="fail-text">{{ row.message }}</span>
+          </div>
+        </div>
+      </div>
     </el-dialog>
 
     <!-- 创建 / 编辑连接 -->
@@ -697,12 +693,24 @@ const logsVisible = ref(false)
 const logsLoading = ref(false)
 const logsLinkId = ref('')
 const logsTitle = ref('')
+
+// 从 STRM 结果或触发消息里解析出绑定的 STRM 序号
+const strmIdOf = (row: any) => {
+  const m = /STRM\s*#(\d+)/.exec(row.strm_result || row.message || '')
+  return m ? m[1] : ''
+}
+const shortStrm = (s: string) => s.replace(/^STRM( 同步)? #\d+：/, '')
+const scrapeClass = (s: string) => {
+  if (s.includes('失败') && !s.includes('失败 0')) return 'fail-text'
+  if (/^成功/.test(s)) return 'ok-text'
+  return 'sub-text'
+}
 const qmsLogs = ref<any[]>([])
 let watchTimer: any = null
 
 const openLogs = async (row: QmsLink) => {
   logsLinkId.value = row.id
-  logsTitle.value = `${row.task_current_name || row.task_name || '任务'} → #${row.qms_id}`
+  logsTitle.value = `${row.task_current_name || row.task_name || '任务'} · 刮削 #${row.qms_id}`
   qmsLogs.value = []
   logsVisible.value = true
   await loadLogs(row.id)
@@ -1010,4 +1018,63 @@ code {
   border-radius: 3px;
   font-size: 12px;
 }
+
+.log-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 58vh;
+  overflow-y: auto;
+}
+.log-card {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: var(--el-fill-color-extra-light);
+}
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.log-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.log-dot.ok { background: var(--el-color-success); }
+.log-dot.bad { background: var(--el-color-danger); }
+.log-status { font-weight: 600; font-size: 13px; }
+.log-time {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  margin-left: auto;
+  font-family: Menlo, Consolas, monospace;
+}
+.log-targets { display: flex; gap: 6px; margin: 8px 0 4px; }
+.tgt {
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 8px;
+  border-radius: 4px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+.tgt.strm {
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success);
+}
+.log-line {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.log-line .lbl {
+  color: var(--el-text-color-secondary);
+  flex-shrink: 0;
+  width: 36px;
+}
+.sub-text { color: var(--el-text-color-regular); }
 </style>

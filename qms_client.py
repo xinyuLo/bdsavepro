@@ -434,7 +434,7 @@ def wait_scrape_result(cfg, qms_ids, since_ts, timeout=SCRAPE_WAIT_TIMEOUT,
                 d = client.scrape_path_detail(qid)
             except Exception as e:  # noqa: BLE001
                 return {'done': False, 'ok': False, 'success': 0, 'failed': 0,
-                        'detail': '查询刮削任务状态失败：%s' % e, 'files': []}
+                        'detail': '查询 QMS 状态失败：%s' % e, 'files': []}
             last[qid] = d
             # 不在运行中，且上次执行时刻晚于我们的触发时刻 → 本次跑完了
             if (not d['is_running'] and not d['is_scraping']
@@ -454,8 +454,8 @@ def wait_scrape_result(cfg, qms_ids, since_ts, timeout=SCRAPE_WAIT_TIMEOUT,
             where = '处理中' if (d.get('is_running') or d.get('is_scraping')) else '未开始'
             state.append('#%s(%s)' % (i, where))
         return {'done': False, 'ok': False, 'success': 0, 'failed': 0, 'files': [],
-                'detail': '等待 %d 秒仍未确认刮削完成：%s — QMS 可能较忙，'
-                          '可稍后在 QMS 界面查看结果' % (timeout, '、'.join(state))}
+                'detail': '未确认：%s，'
+                          'QMS 可能较忙' % '、'.join(state)}
 
     # ---- 任务已跑完，统计本次产生的逐文件记录 ----
     records = []
@@ -495,24 +495,22 @@ def wait_scrape_result(cfg, qms_ids, since_ts, timeout=SCRAPE_WAIT_TIMEOUT,
         if reason or status in ('failed', 'error'):
             failed += 1
             if reason:
-                fails_detail.append('%s（%s）' % (fname, reason))
+                fails_detail.append('%s（%s）' % (fname, reason[:40]))
         else:
             success += 1
             files.append(fname)
 
     if success == 0 and failed == 0:
-        # 任务成功执行，但 QMS 认为目录里没有需要处理的新文件
         return {'done': True, 'ok': True, 'success': 0, 'failed': 0, 'files': [],
-                'no_new': True,
-                'detail': '刮削任务已执行完成：本次没有需要处理的新文件'
-                          '（这些文件此前已刮削过，QMS 会直接跳过）'}
+                'no_new': True, 'detail': '无新文件，QMS 已跳过'}
 
     if failed:
-        detail = '刮削完成：成功 %d 个，失败 %d 个' % (success, failed)
+        detail = '成功 %d / 失败 %d' % (success, failed)
         if fails_detail:
-            detail += '；失败原因：' + '、'.join(fails_detail[:3])
+            detail += '：' + '、'.join(fails_detail[:2])
     else:
-        detail = '刮削完成：成功 %d 个' % success
+        names = '、'.join(files[:3]) + ('…' if len(files) > 3 else '')
+        detail = '成功 %d 个%s' % (success, ('（%s）' % names) if names else '')
     return {'done': True, 'ok': failed == 0, 'success': success,
             'failed': failed, 'detail': detail, 'files': files}
 
@@ -527,7 +525,7 @@ def trigger_strm(link, log_id=None, source='auto'):
         res = QmsClient(cfg).start_sync(int(strm_id))
     except Exception as e:  # noqa: BLE001
         res = {'id': strm_id, 'ok': False, 'message': str(e)}
-    msg = 'STRM 同步 #%s：%s' % (strm_id, res.get('message') or '')
+    msg = 'STRM #%s：%s' % (strm_id, res.get('message') or '')
     if log_id:
         try:
             update_qms_log(log_id, strm_result=msg,
@@ -575,10 +573,12 @@ def trigger_link(link, source='manual', keep=30, watch=True):
         except Exception as e:  # noqa: BLE001
             result = {'id': qms_id, 'ok': False, 'message': str(e)}
 
-    extra = ''
-    if str(link.get('strm_id') or '').isdigit():
-        extra = '，成功后自动触发 STRM #%s' % link.get('strm_id')
-    message = '%s%s' % (result.get('message') or '', extra)
+    if result.get('ok'):
+        message = '已触发刮削 #%s' % qms_id
+        if str(link.get('strm_id') or '').isdigit():
+            message += '，STRM #%s 排队' % link.get('strm_id')
+    else:
+        message = result.get('message') or '触发失败'
 
     log_id = None
     try:
