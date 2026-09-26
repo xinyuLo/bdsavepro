@@ -519,31 +519,61 @@
           <el-card>
             <div class="setting-section">
               <h3>版本信息</h3>
-              <div class="version-info">
-                <div class="info-item">
-                  <span class="info-label">当前版本：</span>
-                  <span class="info-value">{{ APP_VERSION }}</span>
-                </div>
-                <div class="info-item">
-                  <span class="info-label">构建时间：</span>
-                  <span class="info-value">{{ BUILD_TIME }}</span>
-                </div>
-                <div class="info-item">
-                  <span class="info-label">最新版本：</span>
-                  <span class="info-value">{{ latestVersion || '检查中...' }}</span>
-                  <el-tag v-if="hasUpdate" type="warning" size="small" style="margin-left: 8px">
-                    有更新
+
+              <div class="about-card">
+                <div class="about-brand">
+                  <div class="about-logo">Bd</div>
+                  <div class="about-brand-text">
+                    <div class="about-name">BdSavePro</div>
+                    <div class="about-sub">百度网盘自动转存 · 二次开发版</div>
+                  </div>
+                  <el-tag class="about-version" type="primary" effect="dark" size="large">
+                    v{{ APP_VERSION }}
                   </el-tag>
                 </div>
-                <div class="info-item">
-                  <span class="info-label">更新说明：</span>
-                  <span class="info-value">{{ RELEASE_NOTES }}</span>
+
+                <div class="about-grid">
+                  <div class="about-item">
+                    <span class="about-key">构建时间</span>
+                    <span class="about-val">{{ BUILD_TIME }}</span>
+                  </div>
+                  <div class="about-item">
+                    <span class="about-key">开源许可</span>
+                    <span class="about-val">
+                      <el-tag size="small" effect="plain" type="success">AGPL-3.0</el-tag>
+                    </span>
+                  </div>
+                  <div class="about-item">
+                    <span class="about-key">上游项目</span>
+                    <span class="about-val">
+                      <a
+                        href="https://github.com/kokojacket/baidu-autosave"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >@kokojacket / baidu-autosave</a>
+                    </span>
+                  </div>
+                  <div class="about-item">
+                    <span class="about-key">源码仓库</span>
+                    <span class="about-val">
+                      <a
+                        href="https://github.com/xinyuLo/bdsavepro"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >github.com/xinyuLo/bdsavepro</a>
+                    </span>
+                  </div>
+                </div>
+
+                <el-divider class="about-divider" />
+
+                <div class="about-notes">
+                  <div class="about-notes-title">本版包含</div>
+                  <ul class="about-notes-list">
+                    <li v-for="(n, i) in updateNotes" :key="i">{{ n }}</li>
+                  </ul>
                 </div>
               </div>
-              
-              <el-button type="primary" @click="handleVersionCheck" :loading="checking">
-                检查更新
-              </el-button>
             </div>
           </el-card>
         </el-tab-pane>
@@ -557,20 +587,24 @@ import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Delete, User, ArrowDown } from '@element-plus/icons-vue'
 import { storeToRefs } from 'pinia'
-import { useConfigStore, useVersionStore, useAuthStore } from '@/stores'
+import { useConfigStore, useAuthStore } from '@/stores'
 import { APP_VERSION, BUILD_TIME, RELEASE_NOTES } from '@/config/version'
 
 const configStore = useConfigStore()
-const versionStore = useVersionStore()
 const authStore = useAuthStore()
 const { config, saving } = storeToRefs(configStore)
-const { latestVersion, hasUpdate, checking } = storeToRefs(versionStore)
 const { username } = storeToRefs(authStore)
 
-// 版本检查方法
-const handleVersionCheck = () => {
-  versionStore.checkForUpdates() // 检查版本
-}
+// 本版功能清单（不再做联网检查更新，直接列出来）
+const updateNotes = [
+  '任务启用 / 停用开关',
+  '对比路径（可用网盘目录选择器）',
+  '转存文件夹下钻多选 + 是否包含子目录',
+  '排除文件清单，支持一键勾选无 MD5 文件',
+  'MD5 去重：网盘里改了名也不会重复转存',
+  '转存日志迁移至 SQLite，含配置快照与执行详情',
+  'QMediaSync 联动：触发刮削、轮询结果、自动生成 STRM'
+]
 
 const activeTab = ref('notification')
 
@@ -1043,24 +1077,106 @@ onMounted(async () => {
   justify-content: flex-start;
 }
 
-.version-info {
-  margin-bottom: 20px;
+.about-card {
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  padding: 20px 22px;
+  background: linear-gradient(180deg, #fafcff 0%, #ffffff 60%);
 }
 
-.info-item {
+.about-brand {
   display: flex;
   align-items: center;
-  padding: 8px 0;
+  gap: 14px;
 }
 
-.info-label {
-  min-width: 100px;
-  font-weight: 500;
-  color: #333;
+.about-logo {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #409eff, #2f7fe0);
+  color: #fff;
+  font-weight: 700;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: 1px;
+  flex-shrink: 0;
 }
 
-.info-value {
-  color: #666;
+.about-brand-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.about-name {
+  font-size: 17px;
+  font-weight: 600;
+  color: #303133;
+  line-height: 1.3;
+}
+
+.about-sub {
+  font-size: 12px;
+  color: #909399;
+  margin-top: 2px;
+}
+
+.about-version {
+  flex-shrink: 0;
+}
+
+.about-grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px 24px;
+}
+
+.about-item {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+.about-key {
+  min-width: 76px;
+  color: #909399;
+}
+
+.about-val {
+  color: #303133;
+  word-break: break-all;
+}
+
+.about-val a {
+  color: #409eff;
+  text-decoration: none;
+}
+
+.about-val a:hover {
+  text-decoration: underline;
+}
+
+.about-divider {
+  margin: 18px 0 14px;
+}
+
+.about-notes-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 8px;
+}
+
+.about-notes-list {
+  margin: 0;
+  padding-left: 20px;
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.9;
 }
 
 /* 新增表单样式 */

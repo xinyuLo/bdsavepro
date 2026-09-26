@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """QMediaSync 对接模块
 
+能力：
 - 连接测试（GET /api/user/info）
-- 列刮削任务（GET /api/scrape/pathes）
-- 触发刮削启动（POST /api/scrape/pathes/start  body: {"id": <序号>}）
-- 连接列表：把「本工具的任务」一对一绑定到「QMS 的刮削目录」，
-  任务转存到新文件后只触发它绑定的那些刮削任务。
+- 列刮削任务（GET /api/scrape/pathes）/ 触发刮削（POST /api/scrape/pathes/start {"id":N}）
+- 查刮削结果（GET /api/scrape/records —— status=renamed 为成功，failed_reason 非空为失败）
+- 列同步目录（GET /api/sync/path-list）/ 触发 STRM 同步（POST /api/sync/path/start {"id":N}）
+- 连接列表：本工具任务 ↔ QMS 刮削目录（可选再绑一个同步目录），
+  任务转存到新文件后延迟触发刮削，轮询到刮削成功后再触发一次 STRM 生成。
 
-鉴权：优先 API Key（请求头 X-API-Key），其次账号密码（POST /api/login + X-CSRF-Token）
+鉴权：优先 API Key（X-API-Key），其次账号密码（POST /api/login + X-CSRF-Token）
 """
 import threading
 import time
@@ -15,23 +17,30 @@ import uuid
 
 import requests
 
-from history_db import get_kv, set_kv, record_qms_log
+from history_db import get_kv, set_kv, record_qms_log, update_qms_log
 
 DEFAULT_PORT = 12333
 TIMEOUT = 15
 
-# QMS 配置与连接列表存 SQLite（config.json 会被转存进度频繁回写，放里面会被覆盖）
+# 转存后等多久再触发刮削（QMS 可能还没扫到刚落盘的文件）
+TRIGGER_DELAY_SECONDS = 10
+# 刮削成功后再等多久触发 STRM 同步
+STRM_DELAY_SECONDS = 10
+# 轮询刮削结果的上限与间隔
+SCRAPE_WAIT_TIMEOUT = 600
+SCRAPE_POLL_INTERVAL = 15
+
 QMS_KEY = 'qms'
 
 
+# ---------------- 配置读写（存 SQLite，config.json 会被转存进度覆盖） ----------------
+
 def load_cfg():
-    """读取 QMS 配置（含连接列表）"""
     cfg = get_kv(QMS_KEY)
     return dict(cfg) if isinstance(cfg, dict) else {}
 
 
 def save_cfg(cfg):
-    """保存 QMS 配置（含连接列表）"""
     set_kv(QMS_KEY, dict(cfg or {}))
 
 
@@ -51,6 +60,7 @@ def migrate_from_config(storage):
     except Exception:
         pass
     return moved
+
 
 _sessions = {}
 _lock = threading.Lock()
@@ -87,11 +97,13 @@ def normalize_config(cfg):
         'username': (cfg.get('username') or '').strip(),
         'password': cfg.get('password') or '',
         'auto_trigger': cfg.get('auto_trigger', True) is not False,
+        'watch_result': cfg.get('watch_result', True) is not False,
     }
 
 
+# ---------------- 连接列表 ----------------
+
 def get_links(cfg):
-    """取出连接列表（只返回结构正常的条目）"""
     links = (cfg or {}).get('links') or []
     out = []
     for l in links:
@@ -105,6 +117,8 @@ def get_links(cfg):
             'qms_id': l.get('qms_id'),
             'qms_path': str(l.get('qms_path') or ''),
             'qms_media_type': str(l.get('qms_media_type') or ''),
+            'strm_id': l.get('strm_id'),
+            'strm_path': str(l.get('strm_path') or ''),
             'enabled': l.get('enabled', True) is not False,
             'created_at': str(l.get('created_at') or ''),
         })
@@ -138,15 +152,11 @@ def match_links_for_task(links, task):
 
 
 def merge_cfg(saved, incoming):
-    """把「已保存的配置」和「请求里临时传来的（可能还没保存的）连接参数」合并。
-
-    用途：点「测试连接」「刷新刮削目录」时应当用页面上当前填的值，不必先保存。
-    - 普通字段（enabled/host/port/scheme/auth_mode/username）：请求里带了就用请求的；
-    - 密钥字段（api_key/password）：请求里是非空值才覆盖，留空表示沿用已保存的。
-    """
+    """把已保存配置与请求里临时传来的参数合并（测试连接/刷新目录不必先保存）"""
     cfg = dict(saved or {})
     incoming = dict(incoming or {})
-    for key in ('enabled', 'host', 'port', 'scheme', 'auth_mode', 'username'):
+    for key in ('enabled', 'host', 'port', 'scheme', 'auth_mode', 'username',
+                'auto_trigger', 'watch_result'):
         if key in incoming:
             cfg[key] = incoming[key]
     for key in ('api_key', 'password'):
@@ -223,7 +233,6 @@ class QmsClient:
             raise QmsError('返回内容不是 JSON（HTTP %s，可能地址/端口填错）' % resp.status_code)
 
     def _conn_error(self, e):
-        """把底层网络异常翻译成人话"""
         host = '%s:%s' % (self.cfg['host'], self.cfg['port'])
         text = str(e)
         if 'Connection refused' in text or 'NewConnectionError' in text or 'Max retry' in text:
@@ -265,6 +274,7 @@ class QmsClient:
         }
 
     def list_scrape_paths(self):
+        """列刮削任务"""
         data = self._request('get', '/scrape/pathes')
         if data.get('code') != 200:
             raise QmsError(data.get('message') or '获取刮削任务失败')
@@ -282,7 +292,40 @@ class QmsClient:
         out.sort(key=lambda x: (x['id'] is None, x['id']))
         return out
 
+    def list_sync_paths(self):
+        """列同步目录（QMS 的「同步目录管理」，用于生成 STRM）"""
+        data = self._request('get', '/sync/path-list')
+        if data.get('code') != 200:
+            raise QmsError(data.get('message') or '获取同步目录失败')
+        payload = data.get('data') or {}
+        lst = payload.get('list') if isinstance(payload, dict) else payload
+        out = []
+        for it in (lst or []):
+            out.append({
+                'id': it.get('id'),
+                'remote_path': it.get('remote_path') or '',
+                'base_cid': it.get('base_cid') or '',
+                'local_path': it.get('local_path') or '',
+                'source_type': it.get('source_type') or '',
+                'account_name': it.get('account_name') or '',
+                'enable_cron': bool(it.get('enable_cron')),
+                'is_running': it.get('is_running') or 0,
+                'last_sync_at': it.get('last_sync_at') or 0,
+            })
+        out.sort(key=lambda x: (x['id'] is None, x['id']))
+        return out
+
+    def scrape_records(self, page=1, page_size=100):
+        """拉刮削记录（新的在前）"""
+        data = self._request('get', '/scrape/records',
+                             params={'page': int(page), 'page_size': int(page_size)})
+        if data.get('code') != 200:
+            raise QmsError(data.get('message') or '获取刮削记录失败')
+        payload = data.get('data') or {}
+        return (payload.get('list') or []) if isinstance(payload, dict) else (payload or [])
+
     def start(self, ids=None):
+        """触发刮削"""
         ids = [int(i) for i in (ids or [])]
         if not ids:
             raise QmsError('还没有绑定任何刮削任务')
@@ -300,6 +343,16 @@ class QmsClient:
                 results.append({'id': tid, 'ok': False, 'message': str(e)})
         return results
 
+    def start_sync(self, path_id):
+        """触发某个同步目录生成 STRM"""
+        data = self._request('post', '/sync/path/start', {'id': int(path_id)})
+        ok = data.get('code') == 200
+        return {
+            'id': path_id,
+            'ok': ok,
+            'message': data.get('message') or ('已开始同步' if ok else '触发失败'),
+        }
+
 
 def build_summary(results):
     ok_ids = [r['id'] for r in results if r.get('ok')]
@@ -312,42 +365,189 @@ def build_summary(results):
     return '；'.join(parts) or '没有可触发的刮削任务'
 
 
-def trigger_link(link, source='manual', keep=30):
-    """触发一条连接对应的刮削任务，并写入触发日志
+# ---------------- 刮削结果轮询 ----------------
 
-    link: 连接字典（需含 id / qms_id / task_name）
-    返回 {id, ok, message}
+def _scan_source_paths(cfg, qms_ids):
+    """拿这些刮削任务的源路径，用于判断记录是否属于本次触发"""
+    try:
+        paths = QmsClient(cfg).list_scrape_paths()
+    except Exception:
+        return []
+    want = {int(i) for i in qms_ids}
+    return [p['source_path'] for p in paths
+            if p.get('id') in want and p.get('source_path')]
+
+
+def wait_scrape_result(cfg, qms_ids, since_ts, timeout=SCRAPE_WAIT_TIMEOUT,
+                       interval=SCRAPE_POLL_INTERVAL, quiet_rounds=2):
+    """轮询刮削记录，直到这批任务处理完（连续 quiet_rounds 轮无新记录）或超时。
+
+    返回 dict: done / ok / success / failed / skipped / files / detail
+    """
+    source_paths = _scan_source_paths(cfg, qms_ids)
+    deadline = time.time() + timeout
+    seen = {}
+    quiet = 0
+    first = True
+    while True:
+        if not first and time.time() >= deadline:
+            break
+        first = False
+        try:
+            records = QmsClient(cfg).scrape_records(page=1, page_size=100)
+        except Exception as e:  # noqa: BLE001
+            return {'done': False, 'ok': False, 'success': 0, 'failed': 0,
+                    'detail': '轮询刮削结果失败：%s' % e, 'files': []}
+        fresh = 0
+        for r in records:
+            rid = r.get('id')
+            if rid in seen:
+                continue
+            ts = int(r.get('scraped_at') or r.get('updated_at') or r.get('created_at') or 0)
+            if ts < int(since_ts):
+                continue
+            path = r.get('source_full_path') or r.get('path') or ''
+            if source_paths and not any(path.startswith(sp) for sp in source_paths):
+                continue
+            seen[rid] = r
+            fresh += 1
+        if fresh:
+            quiet = 0
+        else:
+            quiet += 1
+            # 已经收到过记录，且连续几轮没有新记录 → 认为处理完了
+            if seen and quiet >= quiet_rounds:
+                break
+            # 一条都没收到时不要过早放弃，等满 timeout
+        if time.time() >= deadline:
+            break
+        time.sleep(interval)
+
+    success, failed, files = 0, 0, []
+    fails_detail = []
+    for r in seen.values():
+        fname = r.get('file_name') or ''
+        reason = (r.get('failed_reason') or '').strip()
+        status = (r.get('status') or '').strip()
+        if reason or status in ('failed', 'error'):
+            failed += 1
+            if reason:
+                fails_detail.append('%s（%s）' % (fname, reason))
+        elif status in ('renamed', 'scraped', 'renaming'):
+            success += 1
+            files.append(fname)
+        else:
+            success += 1
+            files.append(fname)
+
+    if not seen:
+        return {'done': False, 'ok': False, 'success': 0, 'failed': 0,
+                'detail': '等待 %d 秒仍未看到刮削记录（可能还要更久，或该目录没有新文件）' % timeout,
+                'files': []}
+
+    if failed:
+        detail = '刮削完成：成功 %d 个，失败 %d 个' % (success, failed)
+        if fails_detail:
+            detail += '；失败原因：' + '、'.join(fails_detail[:3])
+    else:
+        detail = '刮削完成：成功 %d 个' % success
+    return {'done': True, 'ok': failed == 0, 'success': success,
+            'failed': failed, 'detail': detail, 'files': files}
+
+
+def trigger_strm(link, log_id=None, source='auto'):
+    """触发该连接绑定的 STRM 同步（若有绑定）"""
+    strm_id = link.get('strm_id')
+    if not str(strm_id or '').isdigit():
+        return None
+    cfg = load_cfg()
+    try:
+        res = QmsClient(cfg).start_sync(int(strm_id))
+    except Exception as e:  # noqa: BLE001
+        res = {'id': strm_id, 'ok': False, 'message': str(e)}
+    msg = 'STRM 同步 #%s：%s' % (strm_id, res.get('message') or '')
+    if log_id:
+        try:
+            update_qms_log(log_id, strm_result=msg,
+                           ok_delta=1 if res.get('ok') else 0)
+        except Exception:
+            pass
+    return res
+
+
+def _follow_up(link, log_id, qms_ids, since_ts):
+    """后台线程：轮询刮削结果 → 成功后延迟触发 STRM 同步 → 回写日志"""
+    cfg = load_cfg()
+    if not normalize_config(cfg)['watch_result']:
+        return
+    result = wait_scrape_result(cfg, qms_ids, since_ts)
+    try:
+        update_qms_log(log_id, scrape_result=result.get('detail') or '')
+    except Exception:
+        pass
+    if not result.get('done') or not result.get('ok'):
+        return
+    # 刮削成功 → 等一会让文件落稳，再触发 STRM
+    if not str(link.get('strm_id') or '').isdigit():
+        return
+    time.sleep(STRM_DELAY_SECONDS)
+    trigger_strm(link, log_id=log_id)
+
+
+def trigger_link(link, source='manual', keep=30, watch=True):
+    """触发一条连接的刮削任务，写日志，并在后台跟踪结果
+
+    返回 {id, ok, message, log_id}
     """
     cfg = load_cfg()
     qms_id = link.get('qms_id')
     task_name = link.get('task_name') or ''
     if not str(qms_id or '').isdigit():
-        result = {'id': qms_id, 'ok': False, 'message': '刮削序号无效'}
+        result = {'id': qms_id, 'ok': False, 'message': '刮削序号无效', 'log_id': None}
     else:
         try:
             results = QmsClient(cfg).start([int(qms_id)])
             result = results[0] if results else {'id': qms_id, 'ok': False, 'message': '没有返回结果'}
         except Exception as e:  # noqa: BLE001
             result = {'id': qms_id, 'ok': False, 'message': str(e)}
+
+    extra = ''
+    if str(link.get('strm_id') or '').isdigit():
+        extra = '，成功后自动触发 STRM #%s' % link.get('strm_id')
+    message = '%s%s' % (result.get('message') or '', extra)
+
+    log_id = None
     try:
-        record_qms_log(
+        log_id = record_qms_log(
             link_id=link.get('id'),
             task_name=task_name,
             qms_id=qms_id,
             success=bool(result.get('ok')),
-            message=result.get('message') or '',
+            message=message,
             source=source,
             keep=keep,
         )
     except Exception:
         pass
+    result['log_id'] = log_id
+
+    # 触发成功 + 开了结果跟踪 → 起后台线程轮询
+    if result.get('ok') and watch and str(qms_id or '').isdigit():
+        norm = normalize_config(cfg)
+        if norm['watch_result']:
+            t = threading.Thread(
+                target=_follow_up,
+                args=(link, log_id, [int(qms_id)], int(time.time())),
+                daemon=True,
+                name='qms-watch-%s' % link.get('id'),
+            )
+            t.start()
     return result
 
 
 def trigger_after_transfer(storage, task, transferred_count, dry_run=False):
-    """任务转存到新文件后，触发它绑定的 QMS 刮削任务。
+    """任务转存到新文件后，延迟 TRIGGER_DELAY_SECONDS 再触发它绑定的刮削。
 
-    task 传任务字典（用 task_uid/order/name 匹配连接列表）；
     dry_run 只做匹配不真触发（用于自检）。
     """
     cfg = load_cfg()
@@ -360,7 +560,6 @@ def trigger_after_transfer(storage, task, transferred_count, dry_run=False):
     links = match_links_for_task(get_links(cfg), task)
     if not links:
         return None
-
     valid = [l for l in links if str(l.get('qms_id') or '').isdigit()]
     if not valid:
         return None
@@ -368,22 +567,29 @@ def trigger_after_transfer(storage, task, transferred_count, dry_run=False):
     task_name = (task or {}).get('name') or ('任务%s' % (task or {}).get('order', ''))
     ids = sorted({int(l['qms_id']) for l in valid})
     if dry_run:
-        return '（预演）任务「%s」绑定刮削 %s，将触发' % (task_name, '、'.join('#%s' % i for i in ids))
+        return ('（预演）任务「%s」转存完成后将等 %d 秒，再触发刮削 %s'
+                % (task_name, TRIGGER_DELAY_SECONDS, '、'.join('#%s' % i for i in ids)))
 
-    now = time.strftime('%Y-%m-%d %H:%M:%S')
-    try:
-        results = [trigger_link(l, source='auto') for l in valid]
-        summary = build_summary(results)
-        cfg['last_trigger_at'] = now
-        cfg['last_trigger_result'] = summary
-        cfg['last_trigger_task'] = task_name
-        cfg['last_trigger_ok'] = all(r.get('ok') for r in results)
-        save_cfg(cfg)
-        return summary
-    except Exception as e:  # noqa: BLE001
-        cfg['last_trigger_at'] = now
-        cfg['last_trigger_result'] = '触发失败：%s' % e
-        cfg['last_trigger_task'] = task_name
-        cfg['last_trigger_ok'] = False
-        save_cfg(cfg)
-        return '触发失败：%s' % e
+    def _delayed():
+        time.sleep(TRIGGER_DELAY_SECONDS)
+        now = time.strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            results = [trigger_link(l, source='auto') for l in valid]
+            summary = build_summary(results)
+            c = load_cfg()
+            c['last_trigger_at'] = now
+            c['last_trigger_result'] = summary
+            c['last_trigger_task'] = task_name
+            c['last_trigger_ok'] = all(r.get('ok') for r in results)
+            save_cfg(c)
+        except Exception as e:  # noqa: BLE001
+            c = load_cfg()
+            c['last_trigger_at'] = now
+            c['last_trigger_result'] = '触发失败：%s' % e
+            c['last_trigger_task'] = task_name
+            c['last_trigger_ok'] = False
+            save_cfg(c)
+
+    threading.Thread(target=_delayed, daemon=True, name='qms-delay').start()
+    return '转存完成，%d 秒后自动触发刮削 %s' % (TRIGGER_DELAY_SECONDS,
+                                        '、'.join('#%s' % i for i in ids))

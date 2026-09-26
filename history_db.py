@@ -52,9 +52,19 @@ def _init():
                 trigger_at TEXT,
                 success INTEGER,
                 message TEXT,
-                source TEXT
+                source TEXT,
+                scrape_result TEXT,
+                strm_result TEXT
             )'''
         )
+        # 兼容升级：老库补上后加的两列
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(qms_trigger_log)').fetchall()}
+        for col in ('scrape_result', 'strm_result'):
+            if col not in cols:
+                try:
+                    conn.execute('ALTER TABLE qms_trigger_log ADD COLUMN %s TEXT' % col)
+                except sqlite3.OperationalError:
+                    pass
         conn.commit()
         conn.close()
 
@@ -148,15 +158,16 @@ def delete_kv(key):
 
 # ---------------- QMediaSync 触发日志 ----------------
 
-def record_qms_log(link_id, task_name='', qms_id=None, success=False, message='', source='manual', keep=30):
-    """记一条刮削触发日志，每条连接只保留最近 keep 条"""
+def record_qms_log(link_id, task_name='', qms_id=None, success=False, message='',
+                   source='manual', keep=30):
+    """记一条刮削触发日志，每条连接只保留最近 keep 条。返回日志 id（供后续回写结果）"""
     _init()
     link_id = str(link_id or '')
     with _lock:
         conn = _connect()
-        conn.execute(
-            'INSERT INTO qms_trigger_log (link_id, task_name, qms_id, trigger_at, success, message, source)'
-            ' VALUES (?,?,?,?,?,?,?)',
+        cur = conn.execute(
+            'INSERT INTO qms_trigger_log (link_id, task_name, qms_id, trigger_at, success, message, source, scrape_result, strm_result)'
+            ' VALUES (?,?,?,?,?,?,?,?,?)',
             (
                 link_id,
                 str(task_name or ''),
@@ -165,14 +176,47 @@ def record_qms_log(link_id, task_name='', qms_id=None, success=False, message=''
                 1 if success else 0,
                 str(message or ''),
                 str(source or 'manual'),
+                '',
+                '',
             ),
         )
+        log_id = cur.lastrowid
         conn.commit()
         conn.execute(
             '''DELETE FROM qms_trigger_log WHERE link_id=? AND id NOT IN (
                 SELECT id FROM qms_trigger_log WHERE link_id=? ORDER BY id DESC LIMIT ?)''',
             (link_id, link_id, int(keep)),
         )
+        conn.commit()
+        conn.close()
+        return log_id
+
+
+def update_qms_log(log_id, scrape_result=None, strm_result=None, ok_delta=0, message=None):
+    """回写触发日志的后续结果（刮削轮询结果 / STRM 触发结果）"""
+    if not log_id:
+        return
+    _init()
+    sets, args = [], []
+    if scrape_result is not None:
+        sets.append('scrape_result=?')
+        args.append(str(scrape_result))
+    if strm_result is not None:
+        sets.append('strm_result=?')
+        args.append(str(strm_result))
+    if message is not None:
+        sets.append('message=?')
+        args.append(str(message))
+    if ok_delta:
+        # 只在结果更坏时下调成功标记，避免被后续成功覆盖掉失败
+        sets.append('success=MIN(success, ?)')
+        args.append(1 if ok_delta > 0 else 0)
+    if not sets:
+        return
+    args.append(int(log_id))
+    with _lock:
+        conn = _connect()
+        conn.execute('UPDATE qms_trigger_log SET %s WHERE id=?' % ', '.join(sets), tuple(args))
         conn.commit()
         conn.close()
 
@@ -183,8 +227,8 @@ def get_qms_logs(link_id, limit=30):
     with _lock:
         conn = _connect()
         cur = conn.execute(
-            'SELECT trigger_at, success, message, source, qms_id FROM qms_trigger_log'
-            ' WHERE link_id=? ORDER BY id DESC LIMIT ?',
+            'SELECT trigger_at, success, message, source, qms_id, scrape_result, strm_result'
+            ' FROM qms_trigger_log WHERE link_id=? ORDER BY id DESC LIMIT ?',
             (str(link_id or ''), int(limit)),
         )
         rows = [
@@ -194,6 +238,8 @@ def get_qms_logs(link_id, limit=30):
                 'message': r[2],
                 'source': r[3],
                 'qms_id': r[4],
+                'scrape_result': r[5] or '',
+                'strm_result': r[6] or '',
             }
             for r in cur.fetchall()
         ]

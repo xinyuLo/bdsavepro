@@ -3,8 +3,8 @@
     <div class="page-header">
       <h2>连接 QMediaSync</h2>
       <p class="page-desc">
-        先在这里填好 QMediaSync 的地址和密钥，再到下面「连接列表」里，把你这边的一个任务和 QMS 的一个刮削目录绑起来。
-        那个任务转存到新文件后，就会自动替你点对应的「启动」。
+        先填好 QMediaSync 的地址和密钥，再到「连接列表」里把你这边的一个任务和 QMS 的一个刮削目录绑起来。
+        那个任务转存到新文件后，会自动替你点对应的「启动」；刮削成功后还能顺带触发一次 STRM 生成。
       </p>
     </div>
 
@@ -13,9 +13,11 @@
       <template #header>
         <div class="card-head">
           <span>连接设置</span>
-          <el-tag v-if="connState === 'ok'" type="success" size="small">已连接 · {{ connUser }}</el-tag>
-          <el-tag v-else-if="connState === 'fail'" type="danger" size="small">连接失败</el-tag>
-          <el-tag v-else type="info" size="small">未测试</el-tag>
+          <el-tag v-if="connState === 'ok'" type="success" size="small" effect="light">
+            已连接 · {{ connUser }}
+          </el-tag>
+          <el-tag v-else-if="connState === 'fail'" type="danger" size="small" effect="light">连接失败</el-tag>
+          <el-tag v-else type="info" size="small" effect="light">未测试</el-tag>
         </div>
       </template>
 
@@ -68,12 +70,7 @@
                 </el-icon>
               </template>
             </el-input>
-            <el-button
-              v-if="!keyEditMode"
-              size="small"
-              @mousedown.prevent
-              @click="startEditKey"
-            >
+            <el-button v-if="!keyEditMode" size="small" @mousedown.prevent @click="startEditKey">
               {{ config.has_api_key ? '更换' : '填写' }}
             </el-button>
             <el-button v-else size="small" @mousedown.prevent @click="cancelEditKey">取消</el-button>
@@ -100,7 +97,14 @@
 
         <el-form-item label="自动触发">
           <el-switch v-model="form.auto_trigger" />
-          <span class="form-help-inline">开了以后，下面连接列表里启用的连接才会在转存后自动触发</span>
+          <span class="form-help-inline">开了以后，连接列表里启用的连接才会在转存后自动触发</span>
+        </el-form-item>
+
+        <el-form-item label="跟踪结果">
+          <el-switch v-model="form.watch_result" />
+          <span class="form-help-inline">
+            触发后轮询 QMS，把「刮削成功/失败」写回日志；成功且绑了同步目录时，会自动生成 STRM
+          </span>
         </el-form-item>
 
         <el-form-item>
@@ -117,10 +121,17 @@
     <el-card class="qms-card">
       <template #header>
         <div class="card-head">
-          <span>连接列表（本工具任务 → QMS 刮削目录）</span>
+          <span>连接列表（本工具任务 → QMS）</span>
           <div class="head-actions">
             <el-button size="small" :loading="loadingLinks" @click="loadLinks">刷新</el-button>
-            <el-button size="small" type="success" plain :disabled="!form.enabled" :loading="startingAll" @click="startAll">
+            <el-button
+              size="small"
+              type="success"
+              plain
+              :disabled="!form.enabled"
+              :loading="startingAll"
+              @click="startAll"
+            >
               立即触发全部
             </el-button>
             <el-button size="small" type="primary" @click="openCreate">创建连接</el-button>
@@ -128,34 +139,59 @@
         </div>
       </template>
 
-      <el-empty v-if="links.length === 0" description="还没有连接。点「创建连接」，选一个任务 + 一个 QMS 刮削目录。" :image-size="80" />
+      <el-empty
+        v-if="links.length === 0"
+        description="还没有连接。点「创建连接」，选一个任务 + 一个 QMS 刮削目录。"
+        :image-size="80"
+      />
 
       <el-table v-else :data="links" size="small" style="width: 100%">
-        <el-table-column label="本工具任务" min-width="180">
+        <el-table-column label="本工具任务" min-width="170">
           <template #default="{ row }">
-            <span>{{ row.task_current_name || row.task_name || ('任务' + (row.task_order || '')) }}</span>
+            <span class="cell-main">{{ row.task_current_name || row.task_name || ('任务' + (row.task_order || '')) }}</span>
             <el-tag v-if="!row.task_exists" type="warning" size="small" class="mini-tag">任务已删除</el-tag>
-            <el-tag v-else-if="!row.task_enabled" type="info" size="small" class="mini-tag">任务已停用</el-tag>
+            <el-tag v-else-if="!row.task_enabled" type="info" size="small" class="mini-tag">已停用</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="QMS 刮削目录" min-width="260">
+
+        <el-table-column label="QMS 刮削目录" min-width="240">
           <template #default="{ row }">
-            <span class="qms-path">
-              <b>#{{ row.qms_id }}</b>
-              <span v-if="row.qms_media_type"> · {{ row.qms_media_type }}</span>
-              <span v-if="row.qms_path"> · {{ row.qms_path }}</span>
-            </span>
+            <div class="cell-stack">
+              <span class="cell-main">
+                <el-tag size="small" type="primary" effect="plain">#{{ row.qms_id }}</el-tag>
+                <span v-if="row.qms_media_type" class="muted">· {{ row.qms_media_type }}</span>
+              </span>
+              <span v-if="row.qms_path" class="cell-sub">{{ row.qms_path }}</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="创建时间" width="170">
-          <template #default="{ row }">{{ row.created_at || '-' }}</template>
+
+        <el-table-column label="STRM 同步" min-width="200">
+          <template #default="{ row }">
+            <div v-if="row.strm_id" class="cell-stack">
+              <span class="cell-main">
+                <el-tag size="small" type="success" effect="plain">#{{ row.strm_id }}</el-tag>
+                <span class="muted">刮削成功后生成</span>
+              </span>
+              <span v-if="row.strm_path" class="cell-sub">{{ row.strm_path }}</span>
+            </div>
+            <span v-else class="muted">未绑定</span>
+          </template>
         </el-table-column>
-        <el-table-column label="自动触发" width="100">
+
+        <el-table-column label="创建时间" width="160">
+          <template #default="{ row }">
+            <span class="muted">{{ row.created_at || '-' }}</span>
+          </template>
+        </el-table-column>
+
+        <el-table-column label="自动触发" width="90" align="center">
           <template #default="{ row }">
             <el-switch :model-value="row.enabled" size="small" @change="(v: any) => toggleLink(row, v)" />
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="185">
+
+        <el-table-column label="操作" width="215">
           <template #default="{ row }">
             <el-button
               link
@@ -165,14 +201,16 @@
               :disabled="!form.enabled"
               @click="triggerOne(row)"
             >
-              触发
+              {{ triggeringId === row.id ? '触发中' : '触发' }}
             </el-button>
-            <el-button link type="info" size="small" @click="openLogs(row)">日志</el-button>
+            <el-button link type="info" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button link size="small" @click="openLogs(row)">日志</el-button>
             <el-button link type="danger" size="small" @click="removeLink(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
 
+      <!-- 触发结果提示条 -->
       <el-alert
         v-if="config.last_trigger_at"
         :type="config.last_trigger_ok === false ? 'warning' : 'success'"
@@ -185,42 +223,64 @@
           <span v-if="config.last_trigger_task">（任务：{{ config.last_trigger_task }}）</span>
         </template>
         <div>{{ config.last_trigger_result || '-' }}</div>
+        <div v-if="watchingId" class="watching">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          正在等待 QMS 刮削结果，稍后刷新「日志」可看到最终结论…
+        </div>
       </el-alert>
     </el-card>
 
     <!-- 触发日志 -->
-    <el-dialog v-model="logsVisible" :title="`触发日志 - ${logsTitle}`" width="720px" append-to-body>
+    <el-dialog v-model="logsVisible" :title="`触发日志 - ${logsTitle}`" width="820px" append-to-body>
       <div class="logs-toolbar">
-        <span class="form-help-inline">只保留最近 30 条，超出自动清理</span>
+        <span class="form-help-inline">
+          只保留最近 30 条。触发后会自动轮询 QMS，刮削结果写在「刮削结果」列。
+        </span>
         <el-button size="small" :loading="logsLoading" @click="loadLogs(logsLinkId)">刷新</el-button>
       </div>
       <el-empty v-if="!logsLoading && qmsLogs.length === 0" description="还没有触发记录" :image-size="70" />
       <el-table v-else :data="qmsLogs" size="small" style="width: 100%">
-        <el-table-column label="时间" width="170">
+        <el-table-column label="时间" width="150">
           <template #default="{ row }">{{ row.trigger_at }}</template>
         </el-table-column>
-        <el-table-column label="来源" width="80">
+        <el-table-column label="来源" width="70" align="center">
           <template #default="{ row }">
             <el-tag size="small" :type="row.source === 'auto' ? 'primary' : 'info'" effect="light">
               {{ row.source === 'auto' ? '自动' : '手动' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="结果" width="80">
+        <el-table-column label="触发结果" width="80" align="center">
           <template #default="{ row }">
             <el-tag size="small" :type="row.success ? 'success' : 'danger'" effect="light">
               {{ row.success ? '成功' : '失败' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="消息" min-width="240">
-          <template #default="{ row }">{{ row.message || '-' }}</template>
+        <el-table-column label="刮削结果" min-width="230">
+          <template #default="{ row }">
+            <span v-if="row.scrape_result" :class="row.scrape_result.includes('失败') && !row.scrape_result.includes('失败 0') ? 'fail-text' : 'ok-text'">
+              {{ row.scrape_result }}
+            </span>
+            <span v-else class="muted">等待中…</span>
+            <div v-if="row.strm_result" class="cell-sub">{{ row.strm_result }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="180">
+          <template #default="{ row }">
+            <span class="muted">{{ row.message || '-' }}</span>
+          </template>
         </el-table-column>
       </el-table>
     </el-dialog>
 
-    <!-- 创建连接 -->
-    <el-dialog v-model="createVisible" title="创建连接" width="640px" append-to-body>
+    <!-- 创建 / 编辑连接 -->
+    <el-dialog
+      v-model="createVisible"
+      :title="editingId ? '编辑连接' : '创建连接'"
+      width="660px"
+      append-to-body
+    >
       <el-form label-width="140px">
         <el-form-item label="本工具的任务">
           <el-select
@@ -253,28 +313,55 @@
             />
           </el-select>
           <div class="form-help">
-            列表来自 QMS 的 <code>/api/scrape/pathes</code>；如果为空先点下面的「刷新刮削目录」。
+            转存到新文件后触发它。列表来自 QMS 的 <code>/api/scrape/pathes</code>。
+          </div>
+        </el-form-item>
+
+        <el-form-item label="STRM 同步目录">
+          <el-select
+            v-model="createForm.strm_id"
+            filterable
+            clearable
+            placeholder="可选：刮削成功后顺带生成 STRM"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="s in syncPaths"
+              :key="s.id"
+              :label="`#${s.id} · ${s.remote_path || s.base_cid || s.local_path}`"
+              :value="s.id"
+            />
+          </el-select>
+          <div class="form-help">
+            可选。填了的话，等刮削**成功**后再等 10 秒，自动触发一次这个同步目录生成 STRM；留空则跳过。
           </div>
         </el-form-item>
 
         <el-form-item>
-          <el-button size="small" :loading="loadingPaths" @click="loadPaths">刷新刮削目录</el-button>
-          <span class="form-help-inline">{{ paths.length }} 个刮削任务</span>
+          <div class="refresh-row">
+            <el-button size="small" :loading="loadingPaths" @click="loadPaths">刷新刮削目录</el-button>
+            <span class="form-help-inline">{{ paths.length }} 个刮削任务</span>
+            <el-divider direction="vertical" />
+            <el-button size="small" :loading="loadingSyncPaths" @click="loadSyncPaths">刷新同步目录</el-button>
+            <span class="form-help-inline">{{ syncPaths.length }} 个同步目录</span>
+          </div>
         </el-form-item>
       </el-form>
 
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" :loading="creating" @click="createLink">确认创建</el-button>
+        <el-button type="primary" :loading="creating" @click="submitLink">
+          {{ editingId ? '保存修改' : '确认创建' }}
+        </el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, computed, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { View, Hide } from '@element-plus/icons-vue'
+import { View, Hide, Loading } from '@element-plus/icons-vue'
 import { apiService } from '@/services/api'
 
 interface QmsPath {
@@ -285,6 +372,15 @@ interface QmsPath {
   scrape_type: string
   enable_cron: boolean
   cron_expression: string
+}
+
+interface QmsSyncPath {
+  id: number
+  remote_path: string
+  base_cid: string
+  local_path: string
+  source_type: string
+  is_running?: number
 }
 
 interface QmsLink {
@@ -298,6 +394,8 @@ interface QmsLink {
   qms_id: number | string
   qms_path: string
   qms_media_type: string
+  strm_id?: number | null
+  strm_path?: string
   enabled: boolean
   created_at: string
 }
@@ -311,27 +409,36 @@ const form = reactive({
   api_key: '',
   username: '',
   password: '',
-  auto_trigger: true
+  auto_trigger: true,
+  watch_result: true
 })
 
 const config = ref<any>({})
 const paths = ref<QmsPath[]>([])
+const syncPaths = ref<QmsSyncPath[]>([])
 const links = ref<QmsLink[]>([])
 const tasks = ref<any[]>([])
 const loadingPaths = ref(false)
+const loadingSyncPaths = ref(false)
 const loadingLinks = ref(false)
 const saving = ref(false)
 const testing = ref(false)
 const startingAll = ref(false)
 const creating = ref(false)
 const createVisible = ref(false)
+const editingId = ref('')
 const connState = ref<'none' | 'ok' | 'fail'>('none')
 const connUser = ref('')
 const testMessage = ref('')
+const watchingId = ref('')
 
-const createForm = reactive<{ task_ref: any; qms_id: any }>({ task_ref: '', qms_id: '' })
+const createForm = reactive<{ task_ref: any; qms_id: any; strm_id: any }>({
+  task_ref: '',
+  qms_id: '',
+  strm_id: ''
+})
 
-// ---- API Key 显示与编辑（必须点「更换/填写」才进入编辑态，点输入框不会清空内容） ----
+// ---- API Key 显示与编辑 ----
 const keyEditMode = ref(false)
 const showKey = ref(false)
 const savedKey = ref('')
@@ -376,6 +483,9 @@ const fetchSavedKey = async () => {
 }
 
 const toggleKey = async () => {
+  if (keyEditMode.value && !form.api_key) {
+    keyEditMode.value = false
+  }
   if (showKey.value) {
     showKey.value = false
     return
@@ -396,6 +506,7 @@ const loadConfig = async () => {
     form.auth_mode = c.auth_mode || 'api_key'
     form.username = c.username || ''
     form.auto_trigger = c.auto_trigger !== false
+    form.watch_result = c.watch_result !== false
     if (c.has_api_key) {
       fetchSavedKey()
     }
@@ -404,7 +515,6 @@ const loadConfig = async () => {
   }
 }
 
-// 把页面当前填写的内容带上（这样不用先保存也能测试/刷新）
 const currentConnFields = () => ({
   host: form.host,
   port: form.port,
@@ -415,19 +525,35 @@ const currentConnFields = () => ({
   password: form.password || undefined
 })
 
-const loadPaths = async () => {
+const loadPaths = async (silent = false) => {
   loadingPaths.value = true
   try {
     const res: any = await apiService.getQmsPaths(currentConnFields())
     if (res.success) {
       paths.value = res.paths || []
-    } else {
+    } else if (!silent) {
       ElMessage.error(res.message || '获取刮削目录失败')
     }
   } catch {
-    ElMessage.error('获取刮削目录失败，先检查上面的连接设置')
+    if (!silent) ElMessage.error('获取刮削目录失败，先检查上面的连接设置')
   } finally {
     loadingPaths.value = false
+  }
+}
+
+const loadSyncPaths = async (silent = false) => {
+  loadingSyncPaths.value = true
+  try {
+    const res: any = await apiService.getQmsSyncPaths(currentConnFields())
+    if (res.success) {
+      syncPaths.value = res.paths || []
+    } else if (!silent) {
+      ElMessage.error(res.message || '获取同步目录失败')
+    }
+  } catch {
+    if (!silent) ElMessage.error('获取同步目录失败，先检查上面的连接设置')
+  } finally {
+    loadingSyncPaths.value = false
   }
 }
 
@@ -463,7 +589,6 @@ const save = async () => {
       ...form,
       api_key: form.api_key || undefined,
       password: form.password || undefined,
-      // 用户把已保存的密钥清空后点保存 → 明确告诉后端删除
       clear_api_key: keyEditMode.value && !form.api_key && !!config.value.has_api_key
     })
     if (res.success) {
@@ -506,13 +631,32 @@ const testConn = async () => {
 }
 
 const openCreate = async () => {
+  editingId.value = ''
   createForm.task_ref = ''
   createForm.qms_id = ''
+  createForm.strm_id = ''
   createVisible.value = true
-  await Promise.all([loadTasks(), paths.value.length ? Promise.resolve() : loadPaths()])
+  await Promise.all([
+    loadTasks(),
+    paths.value.length ? Promise.resolve() : loadPaths(true),
+    syncPaths.value.length ? Promise.resolve() : loadSyncPaths(true)
+  ])
 }
 
-const createLink = async () => {
+const openEdit = async (row: QmsLink) => {
+  editingId.value = row.id
+  createForm.task_ref = row.task_uid || row.task_order || ''
+  createForm.qms_id = row.qms_id
+  createForm.strm_id = row.strm_id || ''
+  createVisible.value = true
+  await Promise.all([
+    loadTasks(),
+    paths.value.length ? Promise.resolve() : loadPaths(true),
+    syncPaths.value.length ? Promise.resolve() : loadSyncPaths(true)
+  ])
+}
+
+const submitLink = async () => {
   if (!createForm.task_ref) {
     ElMessage.warning('先选一个任务')
     return
@@ -523,19 +667,26 @@ const createLink = async () => {
   }
   creating.value = true
   try {
-    const res: any = await apiService.createQmsLink({
+    const payload: any = {
       task_ref: createForm.task_ref,
-      qms_id: createForm.qms_id
-    })
+      qms_id: createForm.qms_id,
+      strm_id: createForm.strm_id === '' ? null : createForm.strm_id
+    }
+    let res: any
+    if (editingId.value) {
+      res = await apiService.updateQmsLink({ id: editingId.value, ...payload })
+    } else {
+      res = await apiService.createQmsLink(payload)
+    }
     if (res.success) {
-      ElMessage.success('连接已创建')
+      ElMessage.success(res.message || (editingId.value ? '连接已更新' : '连接已创建'))
       createVisible.value = false
       await loadLinks()
     } else {
-      ElMessage.error(res.message || '创建失败')
+      ElMessage.error(res.message || '保存失败')
     }
   } catch {
-    ElMessage.error('创建失败')
+    ElMessage.error('保存失败')
   } finally {
     creating.value = false
   }
@@ -547,6 +698,7 @@ const logsLoading = ref(false)
 const logsLinkId = ref('')
 const logsTitle = ref('')
 const qmsLogs = ref<any[]>([])
+let watchTimer: any = null
 
 const openLogs = async (row: QmsLink) => {
   logsLinkId.value = row.id
@@ -573,6 +725,36 @@ const loadLogs = async (linkId: string) => {
   }
 }
 
+// 触发后开个轻量轮询，让「等待结果」的感觉能看见
+const startWatch = (linkId: string) => {
+  watchingId.value = linkId
+  if (watchTimer) clearInterval(watchTimer)
+  let rounds = 0
+  watchTimer = setInterval(async () => {
+    rounds += 1
+    try {
+      const res: any = await apiService.getQmsLogs(linkId, 1)
+      const latest = (res.logs || [])[0]
+      if (latest && latest.scrape_result) {
+        watchingId.value = ''
+        clearInterval(watchTimer)
+        watchTimer = null
+        if (logsVisible.value && logsLinkId.value === linkId) {
+          loadLogs(linkId)
+        }
+        ElMessage.success(latest.scrape_result)
+      }
+    } catch {
+      /* 忽略轮询错误 */
+    }
+    if (rounds >= 40) {
+      watchingId.value = ''
+      clearInterval(watchTimer)
+      watchTimer = null
+    }
+  }, 15000)
+}
+
 const triggerOne = async (row: QmsLink) => {
   const qid = Number(row.qms_id)
   if (!qid || Number.isNaN(qid)) {
@@ -584,6 +766,7 @@ const triggerOne = async (row: QmsLink) => {
     const res: any = await apiService.triggerQmsLink(row.id)
     if (res.success) {
       ElMessage.success(res.message || `已触发 #${qid}`)
+      startWatch(row.id)
     } else {
       ElMessage.error(res.message || '触发失败')
     }
@@ -633,7 +816,10 @@ const removeLink = async (row: QmsLink) => {
 }
 
 const startAll = async () => {
-  const ids = links.value.filter((l) => l.enabled).map((l) => Number(l.qms_id)).filter((n) => !Number.isNaN(n))
+  const ids = links.value
+    .filter((l) => l.enabled)
+    .map((l) => Number(l.qms_id))
+    .filter((n) => !Number.isNaN(n))
   if (!ids.length) {
     ElMessage.warning('没有启用的连接')
     return
@@ -649,9 +835,11 @@ const startAll = async () => {
   }
   startingAll.value = true
   try {
-    const res: any = await apiService.startQms({ ids })
+    const res: any = await apiService.startQms({})
     if (res.success) {
       ElMessage.success(res.message || '已触发')
+      const first = links.value.find((l) => l.enabled)
+      if (first) startWatch(first.id)
     } else {
       ElMessage.error(res.message || '触发失败')
     }
@@ -668,8 +856,13 @@ onMounted(async () => {
   await loadLinks()
   if (form.host) {
     testConn()
-    loadPaths()
+    loadPaths(true)
+    loadSyncPaths(true)
   }
+})
+
+onUnmounted(() => {
+  if (watchTimer) clearInterval(watchTimer)
 })
 </script>
 
@@ -755,10 +948,30 @@ onMounted(async () => {
   color: #f56c6c;
 }
 
-.qms-path {
+.muted {
+  color: #909399;
+  font-size: 12px;
+}
+
+.cell-main {
   font-size: 13px;
-  color: #409eff;
+  color: #303133;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cell-sub {
+  font-size: 12px;
+  color: #909399;
   word-break: break-all;
+  line-height: 1.5;
+}
+
+.cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .mini-tag {
@@ -767,6 +980,28 @@ onMounted(async () => {
 
 .last-result {
   margin-top: 14px;
+}
+
+.watching {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #e6a23c;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.refresh-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 code {

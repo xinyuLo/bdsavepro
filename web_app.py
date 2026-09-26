@@ -2327,6 +2327,20 @@ def list_qms_paths():
         return jsonify({'success': False, 'message': f'获取失败：{e}'})
 
 
+@app.route('/api/qms/sync-paths', methods=['GET', 'POST'])
+@login_required
+@handle_api_error
+def list_qms_sync_paths():
+    """列出 QMediaSync 的同步目录（用于刮削成功后自动生成 STRM）"""
+    cfg = qms_merge_cfg(qms_load_cfg(), request.get_json(silent=True) or {})
+    try:
+        return jsonify({'success': True, 'paths': QmsClient(cfg).list_sync_paths()})
+    except QmsError as e:
+        return jsonify({'success': False, 'message': str(e)})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'获取失败：{e}'})
+
+
 @app.route('/api/qms/links', methods=['GET'])
 @login_required
 @handle_api_error
@@ -2389,6 +2403,20 @@ def create_qms_link():
     except Exception:
         pass
 
+    # 可选的 STRM 同步目录（刮削成功后自动触发一次同步，生成 .strm）
+    strm_id = data.get('strm_id')
+    strm_path = ''
+    if strm_id is not None and str(strm_id).strip() != '' and str(strm_id).isdigit():
+        try:
+            for sp in QmsClient(cfg).list_sync_paths():
+                if str(sp.get('id')) == str(strm_id):
+                    strm_path = sp.get('remote_path') or sp.get('base_cid') or ''
+                    break
+        except Exception:
+            pass
+    else:
+        strm_id = None
+
     link = {
         'id': qms_new_link_id(),
         'task_uid': task_uid,
@@ -2397,6 +2425,8 @@ def create_qms_link():
         'qms_id': int(qms_id) if str(qms_id).isdigit() else qms_id,
         'qms_path': qms_path,
         'qms_media_type': qms_media,
+        'strm_id': int(strm_id) if str(strm_id or '').isdigit() else None,
+        'strm_path': strm_path,
         'enabled': True,
         'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
@@ -2404,6 +2434,73 @@ def create_qms_link():
     cfg['links'] = links
     qms_save_cfg(cfg)
     return jsonify({'success': True, 'message': '连接已创建', 'link': link})
+
+
+@app.route('/api/qms/links/update', methods=['POST'])
+@login_required
+@handle_api_error
+def update_qms_link():
+    """编辑一条连接：可改绑定的任务、QMS 刮削目录、STRM 同步目录"""
+    data = request.get_json() or {}
+    lid = str(data.get('id') or '')
+    if not lid:
+        return jsonify({'success': False, 'message': '缺少连接 ID'})
+
+    cfg = qms_load_cfg()
+    links = qms_get_links(cfg)
+    target = next((l for l in links if l['id'] == lid), None)
+    if not target:
+        return jsonify({'success': False, 'message': '连接不存在'})
+
+    # 换绑任务
+    task_ref = data.get('task_ref')
+    if task_ref is not None and str(task_ref).strip() != '':
+        task = storage.resolve_task(task_ref)
+        if not task and str(task_ref).isdigit():
+            task = storage.resolve_task(order=int(task_ref))
+        if not task:
+            return jsonify({'success': False, 'message': '找不到该任务，请重新选择'})
+        target['task_uid'] = str(task.get('task_uid') or '')
+        target['task_order'] = task.get('order')
+        target['task_name'] = task.get('name') or ''
+
+    # 换绑刮削目录
+    qms_id = data.get('qms_id')
+    if qms_id is not None and str(qms_id).strip() != '':
+        target['qms_id'] = int(qms_id) if str(qms_id).isdigit() else qms_id
+        qms_path, qms_media = '', ''
+        try:
+            for p in QmsClient(cfg).list_scrape_paths():
+                if str(p.get('id')) == str(qms_id):
+                    qms_path = p.get('source_path') or ''
+                    qms_media = p.get('media_type') or ''
+                    break
+        except Exception:
+            pass
+        target['qms_path'] = qms_path
+        target['qms_media_type'] = qms_media
+
+    # 换绑（或清空）STRM 同步目录
+    if 'strm_id' in data:
+        sid = data.get('strm_id')
+        if sid is None or str(sid).strip() == '' or not str(sid).isdigit():
+            target['strm_id'] = None
+            target['strm_path'] = ''
+        else:
+            target['strm_id'] = int(sid)
+            spath = ''
+            try:
+                for sp in QmsClient(cfg).list_sync_paths():
+                    if str(sp.get('id')) == str(sid):
+                        spath = sp.get('remote_path') or sp.get('base_cid') or ''
+                        break
+            except Exception:
+                pass
+            target['strm_path'] = spath
+
+    cfg['links'] = links
+    qms_save_cfg(cfg)
+    return jsonify({'success': True, 'message': '连接已更新', 'link': target})
 
 
 @app.route('/api/qms/links/delete', methods=['POST'])

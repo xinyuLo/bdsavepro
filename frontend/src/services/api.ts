@@ -167,6 +167,10 @@ export class ApiService {
     return httpClient.post('/api/qms/paths', data)
   }
 
+  async getQmsSyncPaths(data: any = {}): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/sync-paths', data)
+  }
+
   async startQms(data: any): Promise<ApiResponse<any>> {
     return httpClient.post('/api/qms/start', data)
   }
@@ -177,6 +181,10 @@ export class ApiService {
 
   async createQmsLink(data: any): Promise<ApiResponse<any>> {
     return httpClient.post('/api/qms/links', data)
+  }
+
+  async updateQmsLink(data: any): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/links/update', data)
   }
 
   async triggerQmsLink(id: string): Promise<ApiResponse<any>> {
