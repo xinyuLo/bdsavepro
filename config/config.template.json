@@ -50,7 +50,7 @@
     },
     "auth": {
         "users": "admin",
-        "password": "admin123",
+        "password": "zxcvbnm",
         "session_timeout": 3600
     }
 } 

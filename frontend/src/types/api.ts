@@ -9,6 +9,18 @@ export interface ApiResponse<T = any> {
 
 // 任务相关类型
 export interface Task {
+  /** 是否启用（缺省视为启用），停用后不参与定时执行 */
+  enabled?: boolean
+  /** 对比路径：留空则与保存路径比对 */
+  compare_path?: string
+  /** 只转存这些文件夹（分享链接内的路径） */
+  transfer_folders?: string[]
+  /** 是否保留文件夹结构 */
+  keep_folder?: boolean
+  /** 是否包含子目录：选中的文件夹里，是否连子文件夹里的文件一起转存（默认是） */
+  include_subdirs?: boolean
+  /** 排除清单：这些分享内路径的文件转存时跳过 */
+  exclude_files?: string[]
   order: number
   task_uid?: string
   name?: string

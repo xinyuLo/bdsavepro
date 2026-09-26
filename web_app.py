@@ -1,6 +1,20 @@
 from flask import Flask, request, jsonify, render_template, send_from_directory, session, redirect, url_for, Response, stream_with_context
 from storage import BaiduStorage
 from scheduler import TaskScheduler
+from history_db import get_qms_logs as qms_get_logs
+from qms_client import (
+    QmsClient,
+    QmsError,
+    build_summary as qms_build_summary,
+    get_links as qms_get_links,
+    load_cfg as qms_load_cfg,
+    merge_cfg as qms_merge_cfg,
+    migrate_from_config as qms_migrate_from_config,
+    new_link_id as qms_new_link_id,
+    save_cfg as qms_save_cfg,
+    trigger_link as qms_trigger_link,
+    trigger_after_transfer as qms_trigger_after_transfer,
+)
 import json
 from loguru import logger
 import sys
@@ -240,6 +254,13 @@ def init_app():
         # 初始化存储
         logger.info("正在初始化存储...")
         storage = BaiduStorage()
+
+        # 修改: 早期 QMS 配置写在 config.json，会被转存进度回写冲掉，迁移到 SQLite
+        try:
+            if qms_migrate_from_config(storage):
+                logger.info("QMS 配置已从 config.json 迁移到 SQLite")
+        except Exception as e:
+            logger.warning(f"QMS 配置迁移失败: {e}")
         
         # 使用已创建的 storage 实例初始化调度器
         try:
@@ -409,6 +430,21 @@ def add_task():
     try:
         # 添加任务 - storage.py 内部会处理调度器更新
         if storage.add_task(url, save_dir, pwd, name, cron, category, regex_pattern, regex_replace):
+            # 修改: 保存扩展字段（对比路径 / 转存文件夹 / 是否保存文件夹）
+            try:
+                tasks = storage.config.get('baidu', {}).get('tasks', [])
+                target = None
+                for t in tasks:
+                    if t.get('url') == url:
+                        target = t
+                if target is not None:
+                    target['compare_path'] = data.get('compare_path', '').strip()
+                    target['transfer_folders'] = data.get('transfer_folders') or []
+                    target['keep_folder'] = bool(data.get('keep_folder'))
+                    target['include_subdirs'] = bool(data.get('include_subdirs', True))
+                    storage._save_config()
+            except Exception as e:
+                logger.error(f"保存任务扩展字段失败: {str(e)}")
             
             return jsonify({'success': True, 'message': '添加任务成功'})
             
@@ -466,6 +502,9 @@ def update_task():
         'name': data.get('name', '').strip(),
         'cron': data.get('cron', '').strip(),
         'category': data.get('category', '').strip(),
+        'compare_path': data.get('compare_path', '').strip(),
+        'transfer_folders': data.get('transfer_folders') or [],
+        'keep_folder': bool(data.get('keep_folder')),
         'regex_pattern': data.get('regex_pattern', '').strip(),
         'regex_replace': data.get('regex_replace', '').strip(),
         'order': task_order,  # 保持原有的order
@@ -741,6 +780,15 @@ def execute_task():
                 current_task  # 传入完整的任务配置
             )
 
+            # 修改: 记录本次运行的真实结果（执行历史必须用本次数据，不能读任务上残留的旧值）
+            try:
+                _st = storage._transfer_stats.setdefault(task_order, {})
+                _st['transferred_files'] = list(result.get('transferred_files') or [])
+                _st['save_dir'] = current_task.get('save_dir') or ''
+                _st['compare_dir'] = current_task.get('compare_path') or current_task.get('save_dir') or ''
+            except Exception as _st_err:
+                logger.debug(f"记录本次转存结果失败: {_st_err}")
+
             if result.get('success'):
                 transferred_files = result.get('transferred_files', [])
                 if transferred_files:
@@ -797,7 +845,57 @@ def execute_task():
             _publish_task_completed(task_order, task_uid)
 
     # 启动异步任务并立即返回
-    thread = threading.Thread(target=execute_task_async)
+    def _execute_task_async_with_history():
+        """修改: 手动执行也记录转存历史（SQLite）"""
+        from history_db import record_task_history
+        start_time = time.strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            execute_task_async()
+        finally:
+            try:
+                current = storage.resolve_task(task_uid, order=task_order, url=task_url) or {}
+                stats = {}
+                if hasattr(storage, '_transfer_stats'):
+                    stats = storage._transfer_stats.pop(task_order, {}) or {}
+                raw_logs = (app.task_logs.get(task_order) or [])[-300:]
+                logs = [f"[{e.get('level', 'INFO')}] {e.get('message', '')}" for e in raw_logs]
+                # 修改: 只认本次运行真实转存的文件（0 个就是 0 个，不用任务里可能残留的旧数据）
+                transferred = list(stats.get('transferred_files') or [])
+                record = {
+                    'start_time': start_time,
+                    'end_time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'success': current.get('status') != 'error',
+                    'message': current.get('message', ''),
+                    'file_count': len(transferred),
+                    'transferred_files': transferred,
+                    'excluded_files': stats.get('excluded_files_list') or list(current.get('exclude_files') or []),
+                    'regex_passed_files': list(stats.get('regex_passed_files') or []),
+                    'regex_matched_files': list(stats.get('regex_matched_files') or []),
+                    'save_dir': stats.get('save_dir') or current.get('save_dir') or '',
+                    'compare_dir': stats.get('compare_dir') or current.get('compare_path') or current.get('save_dir') or '',
+                    'transfer_folders': list(stats.get('transfer_folders') or (current.get('transfer_folders') or [])),
+                    'include_subdirs': stats.get('include_subdirs', current.get('include_subdirs', True)),
+                    'keep_folder': stats.get('keep_folder', bool(current.get('keep_folder'))),
+                    'regex_pattern': stats.get('regex_pattern') or current.get('regex_pattern') or '',
+                    'total_count': stats.get('total', 0),
+                    'excluded_count': stats.get('excluded', 0),
+                    'filtered_count': stats.get('filtered', 0),
+                    'md5_skipped': stats.get('md5_skipped', 0),
+                    'logs': logs,
+                }
+                record_task_history(task_uid=task_uid, order=task_order, record=record, keep=10)
+                # 修改: 转存到新文件后自动触发 QMediaSync 刮削
+                try:
+                    _qms_msg = qms_trigger_after_transfer(storage, current, len(transferred))
+                    if _qms_msg:
+                        logger.info(f"QMediaSync: {_qms_msg}")
+                        _append_task_log(task_order, f'QMediaSync: {_qms_msg}', task_uid=task_uid)
+                except Exception as _qms_err:
+                    logger.error(f"触发 QMediaSync 失败: {_qms_err}")
+            except Exception as rec_err:
+                logger.error(f"记录转存历史失败(手动执行): {rec_err}")
+
+    thread = threading.Thread(target=_execute_task_async_with_history)
     thread.daemon = True  # 设置为守护线程
     thread.start()
     
@@ -1216,6 +1314,35 @@ def test_notify():
     except Exception as e:
         logger.error(f"发送测试通知失败: {str(e)}")
         return jsonify({'success': False, 'message': f'发送测试通知失败: {str(e)}'})
+
+
+@app.route('/api/task/toggle', methods=['POST'])
+@login_required
+@handle_api_error
+def toggle_task_enabled():
+    """启用/停用任务：停用后定时任务不再自动执行"""
+    data = request.get_json() or {}
+    try:
+        task_id = int(data.get('task_id', -1))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': '无效的任务ID'})
+
+    if not storage:
+        return jsonify({'success': False, 'message': '存储未初始化'})
+
+    tasks = storage.config.get('baidu', {}).get('tasks', [])
+    task_order = task_id + 1  # 前端task_id从0开始，order从1开始
+    task = next((t for t in tasks if t.get('order') == task_order), None)
+    if not task:
+        return jsonify({'success': False, 'message': f'未找到任务(order={task_order})'})
+
+    task['enabled'] = not task.get('enabled', True)
+    storage._save_config()
+    return jsonify({
+        'success': True,
+        'enabled': task['enabled'],
+        'message': '任务已启用' if task['enabled'] else '任务已停用'
+    })
 
 @app.route('/api/tasks/execute-all', methods=['POST'])
 @login_required
@@ -1938,6 +2065,473 @@ def cleanup_old_task_logs():
                 
     except Exception as e:
         logger.error(f"清理任务日志失败: {str(e)}")
+
+@app.route('/api/share/folders', methods=['POST'])
+@login_required
+@handle_api_error
+def list_share_folders():
+    """列出分享链接里的顶层文件夹（供"转存文件夹"多选使用）"""
+    data = request.get_json() or {}
+    url = (data.get('url') or '').strip()
+    pwd = (data.get('pwd') or '').strip()
+    if not url:
+        return jsonify({'success': False, 'message': '请先填写转存链接'})
+    sub_path = (data.get('path') or '').strip()
+    try:
+        storage._access_shared_with_retry(url, pwd)
+        paths = storage._shared_paths_with_retry(shared_url=url)
+        if sub_path:
+            # 修改: 下钻——列出分享内任意层目录的子文件夹
+            first = next((p for p in (paths or []) if getattr(p, 'uk', None)), None)
+            if first is None:
+                return jsonify({'success': False, 'message': '读取失败：分享为空'})
+            paths = storage._list_shared_paths_with_retry(
+                sub_path, first.uk, first.share_id, first.bdstoken, page=1, size=100)
+    except Exception as e:
+        logger.error(f"获取分享文件夹列表失败: {str(e)}")
+        return jsonify({'success': False, 'message': f'读取失败：{e}'})
+    folders = []
+    for p in (paths or []):
+        if getattr(p, 'is_dir', False):
+            raw = str(getattr(p, 'path', '') or '')
+            folders.append({'name': raw.rstrip('/').rsplit('/', 1)[-1] or raw, 'path': raw})
+    return jsonify({'success': True, 'folders': folders})
+
+@app.route('/api/share/filtered-files', methods=['POST'])
+@login_required
+@handle_api_error
+def share_filtered_files():
+    """按任务的文件过滤正则，列出该链接当前能转存进来的文件（供"排除文件"勾选）"""
+    data = request.get_json() or {}
+    url = (data.get('url') or '').strip()
+    pwd = (data.get('pwd') or '').strip()
+    if not url:
+        return jsonify({'success': False, 'message': '缺少转存链接'})
+    if not storage:
+        return jsonify({'success': False, 'message': '存储未初始化'})
+
+    task = None
+    try:
+        task_order = int(data.get('task_id')) + 1
+        tasks = storage.config.get('baidu', {}).get('tasks', [])
+        task = next((t for t in tasks if t.get('order') == task_order), None)
+    except (TypeError, ValueError):
+        task = None
+
+    existing_excludes = list((task or {}).get('exclude_files') or [])
+
+    try:
+        storage._access_shared_with_retry(url, pwd)
+        shared_paths = storage._shared_paths_with_retry(shared_url=url)
+        if not shared_paths:
+            return jsonify({'success': False, 'message': '获取分享文件列表失败（链接可能已失效）'})
+        uk = shared_paths[0].uk
+        share_id = shared_paths[0].share_id
+        bdstoken = shared_paths[0].bdstoken
+        files = []
+        for p in shared_paths:
+            if getattr(p, 'is_dir', False):
+                files.extend(storage._list_shared_dir_files(p, uk, share_id, bdstoken))
+            else:
+                raw = str(getattr(p, 'path', '') or '')
+                files.append({
+                    'server_filename': raw.rstrip('/').rsplit('/', 1)[-1],
+                    'path': raw,
+                    'size': getattr(p, 'size', 0),
+                    'isdir': 0,
+                    'md5': str(getattr(p, 'md5', '') or '')
+                })
+    except Exception as e:
+        logger.error(f"读取分享文件失败: {str(e)}")
+        return jsonify({'success': False, 'message': f'读取失败（链接可能已失效）：{e}'})
+
+    # 修改: 对齐转存时的路径清理（剥掉转存文件夹/单根目录层），再套正则，
+    # 否则 ^ 开头的锚定正则会把带文件夹前缀的文件全部滤掉（30/31/32 集看不到的原因）
+    selected_folders = [str(p).strip('/') for p in ((task or {}).get('transfer_folders') or []) if str(p).strip()]
+    keep_folder = bool((task or {}).get('keep_folder'))
+    strip_names = set()
+    if selected_folders and not keep_folder:
+        strip_names = {p.rsplit('/', 1)[-1] for p in selected_folders}
+    is_single_folder = (not selected_folders) and len(shared_paths) == 1 and bool(getattr(shared_paths[0], 'is_dir', False))
+
+    candidates = []
+    for f in files:
+        path = f.get('path', '')
+        clean = path
+        if is_single_folder and '/' in clean:
+            clean = '/'.join(clean.split('/')[1:])
+        elif strip_names:
+            segs = clean.strip('/').split('/')
+            if len(segs) > 1 and segs[0] in strip_names:
+                clean = '/'.join(segs[1:])
+        if task:
+            try:
+                should, _final = storage._apply_regex_rules(clean, task)
+                if not should:
+                    continue
+            except Exception:
+                pass
+        candidates.append({'path': path, 'size': f.get('size', 0), 'md5': f.get('md5', '') or ''})
+
+    return jsonify({
+        'success': True,
+        'files': candidates,
+        'excluded': existing_excludes
+    })
+
+@app.route('/api/task/exclude', methods=['POST'])
+@login_required
+@handle_api_error
+def set_task_excludes():
+    """设置任务的排除文件清单（这些文件后续转存时跳过）"""
+    data = request.get_json() or {}
+    try:
+        task_id = int(data.get('task_id', -1))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'message': '无效的任务ID'})
+    if not storage:
+        return jsonify({'success': False, 'message': '存储未初始化'})
+    files = data.get('files')
+    if not isinstance(files, list):
+        return jsonify({'success': False, 'message': 'files 必须是数组'})
+    tasks = storage.config.get('baidu', {}).get('tasks', [])
+    task_order = task_id + 1
+    task = next((t for t in tasks if t.get('order') == task_order), None)
+    if not task:
+        return jsonify({'success': False, 'message': f'未找到任务(order={task_order})'})
+    task['exclude_files'] = [str(f) for f in files if str(f).strip()]
+    storage._save_config()
+    return jsonify({
+        'success': True,
+        'message': f'已保存排除清单（{len(task["exclude_files"])} 个文件）',
+        'exclude_files': task['exclude_files']
+    })
+
+@app.route('/api/netdisk/folders', methods=['POST'])
+@login_required
+@handle_api_error
+def list_netdisk_folders():
+    """列出当前网盘账号指定目录下的子文件夹（供"对比路径"选择框使用）"""
+    data = request.get_json() or {}
+    path = (data.get('path') or '/').strip() or '/'
+    if not path.startswith('/'):
+        path = '/' + path
+    path = path.rstrip('/') or '/'
+    if not storage:
+        return jsonify({'success': False, 'message': '存储未初始化'})
+    try:
+        entries = storage._list_dir_entries_with_fallback(path)
+    except Exception as e:
+        logger.error(f"列出网盘目录失败: {str(e)}")
+        return jsonify({'success': False, 'message': f'读取目录失败：{e}'})
+
+    folders = []
+    for item in entries or []:
+        try:
+            if not storage._is_list_entry_dir(item):
+                continue
+            p = storage._get_list_entry_path(item)
+            if not p:
+                continue
+            p = p.rstrip('/') or '/'
+            folders.append({'name': p.rsplit('/', 1)[-1] or p, 'path': p})
+        except Exception:
+            continue
+
+    # 去重并保持顺序
+    seen = set()
+    unique_folders = []
+    for f in folders:
+        if f['path'] in seen:
+            continue
+        seen.add(f['path'])
+        unique_folders.append(f)
+
+    parent = path.rsplit('/', 1)[0] or '/'
+    return jsonify({'success': True, 'path': path, 'parent': parent, 'folders': unique_folders})
+
+@app.route('/api/qms/config', methods=['GET'])
+@login_required
+@handle_api_error
+def get_qms_config():
+    """读取 QMediaSync 对接配置（密钥只回显掩码）"""
+    raw = qms_load_cfg()
+    api_key = str(raw.get('api_key') or '')
+    out = {k: v for k, v in raw.items() if k not in ('api_key', 'password')}
+    out['has_api_key'] = bool(api_key)
+    if len(api_key) > 8:
+        out['api_key_masked'] = api_key[:8] + '*' * 11
+    else:
+        out['api_key_masked'] = '*' * len(api_key)
+    out['has_password'] = bool(raw.get('password'))
+    return jsonify({'success': True, 'config': out})
+
+
+@app.route('/api/qms/config', methods=['POST'])
+@login_required
+@handle_api_error
+def save_qms_config():
+    """保存 QMediaSync 对接配置（密钥留空表示不修改）"""
+    data = request.get_json() or {}
+    cfg = qms_load_cfg()
+    for key in ('enabled', 'host', 'port', 'scheme', 'auth_mode', 'username', 'task_ids', 'auto_trigger'):
+        if key in data:
+            cfg[key] = data[key]
+    if (data.get('api_key') or '').strip():
+        cfg['api_key'] = data['api_key'].strip()
+    if data.get('clear_api_key'):
+        cfg['api_key'] = ''
+    if data.get('password'):
+        cfg['password'] = data['password']
+    if data.get('clear_password'):
+        cfg['password'] = ''
+    qms_save_cfg(cfg)
+    return jsonify({'success': True, 'message': 'QMediaSync 配置已保存'})
+
+
+@app.route('/api/qms/reveal', methods=['POST'])
+@login_required
+@handle_api_error
+def reveal_qms_key():
+    """返回已保存的 API Key 明文（登录后可用，供页面上「小眼睛」查看）"""
+    cfg = qms_load_cfg()
+    return jsonify({'success': True, 'api_key': str(cfg.get('api_key') or '')})
+
+
+@app.route('/api/qms/test', methods=['POST'])
+@login_required
+@handle_api_error
+def test_qms_config():
+    """测试与 QMediaSync 的连接（用页面当前填写的值，不必先保存）"""
+    cfg = qms_merge_cfg(qms_load_cfg(), request.get_json(silent=True) or {})
+    try:
+        info = QmsClient(cfg).test()
+        return jsonify({'success': True, 'message': '连接成功', 'username': info.get('username')})
+    except QmsError as e:
+        return jsonify({'success': False, 'message': str(e)})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'连接失败：{e}'})
+
+
+@app.route('/api/qms/paths', methods=['GET', 'POST'])
+@login_required
+@handle_api_error
+def list_qms_paths():
+    """列出 QMediaSync 里的刮削任务（供选择序号，支持用未保存的连接参数）"""
+    cfg = qms_merge_cfg(qms_load_cfg(), request.get_json(silent=True) or {})
+    try:
+        return jsonify({'success': True, 'paths': QmsClient(cfg).list_scrape_paths()})
+    except QmsError as e:
+        return jsonify({'success': False, 'message': str(e)})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'获取失败：{e}'})
+
+
+@app.route('/api/qms/links', methods=['GET'])
+@login_required
+@handle_api_error
+def list_qms_links():
+    """连接列表：本工具任务 ↔ QMS 刮削目录"""
+    cfg = qms_load_cfg()
+    links = qms_get_links(cfg)
+    tasks = storage.list_tasks() or []
+    by_uid = {str(t.get('task_uid')): t for t in tasks if t.get('task_uid')}
+    by_order = {t.get('order'): t for t in tasks}
+    out = []
+    for l in links:
+        t = by_uid.get(l['task_uid']) or by_order.get(l['task_order'])
+        item = dict(l)
+        item['task_exists'] = bool(t)
+        item['task_current_name'] = (t or {}).get('name') or l.get('task_name') or ''
+        item['task_enabled'] = (t or {}).get('enabled', True) is not False
+        out.append(item)
+    return jsonify({'success': True, 'links': out})
+
+
+@app.route('/api/qms/links', methods=['POST'])
+@login_required
+@handle_api_error
+def create_qms_link():
+    """创建连接：选一个本工具任务 + 一个 QMS 刮削目录"""
+    data = request.get_json() or {}
+    task_ref = data.get('task_ref')
+    qms_id = data.get('qms_id')
+    if qms_id is None or str(qms_id).strip() == '':
+        return jsonify({'success': False, 'message': '请选择 QMediaSync 的刮削目录'})
+    if task_ref is None or str(task_ref).strip() == '':
+        return jsonify({'success': False, 'message': '请选择要绑定的任务'})
+
+    task = storage.resolve_task(task_ref)
+    if not task and isinstance(task_ref, (int, str)) and str(task_ref).isdigit():
+        task = storage.resolve_task(order=int(task_ref))
+    if not task:
+        return jsonify({'success': False, 'message': '找不到该任务，请重新选择'})
+
+    cfg = qms_load_cfg()
+    links = qms_get_links(cfg)
+    task_uid = str(task.get('task_uid') or '')
+    task_order = task.get('order')
+    for l in links:
+        same_task = (task_uid and l['task_uid'] == task_uid) or (
+            not task_uid and l.get('task_order') == task_order
+        )
+        if same_task and str(l.get('qms_id')) == str(qms_id):
+            return jsonify({'success': False, 'message': '这条连接已经存在了，不用重复创建'})
+
+    # 顺手把 QMS 侧的路径信息记下来（拿不到也不影响创建）
+    qms_path, qms_media = '', ''
+    try:
+        for p in QmsClient(cfg).list_scrape_paths():
+            if str(p.get('id')) == str(qms_id):
+                qms_path = p.get('source_path') or ''
+                qms_media = p.get('media_type') or ''
+                break
+    except Exception:
+        pass
+
+    link = {
+        'id': qms_new_link_id(),
+        'task_uid': task_uid,
+        'task_order': task_order,
+        'task_name': task.get('name') or '',
+        'qms_id': int(qms_id) if str(qms_id).isdigit() else qms_id,
+        'qms_path': qms_path,
+        'qms_media_type': qms_media,
+        'enabled': True,
+        'created_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    links.append(link)
+    cfg['links'] = links
+    qms_save_cfg(cfg)
+    return jsonify({'success': True, 'message': '连接已创建', 'link': link})
+
+
+@app.route('/api/qms/links/delete', methods=['POST'])
+@login_required
+@handle_api_error
+def delete_qms_link():
+    """删除一条连接"""
+    data = request.get_json() or {}
+    lid = str(data.get('id') or '')
+    if not lid:
+        return jsonify({'success': False, 'message': '缺少连接 ID'})
+    cfg = qms_load_cfg()
+    links = qms_get_links(cfg)
+    kept = [l for l in links if l['id'] != lid]
+    if len(kept) == len(links):
+        return jsonify({'success': False, 'message': '连接不存在'})
+    cfg['links'] = kept
+    qms_save_cfg(cfg)
+    return jsonify({'success': True, 'message': '连接已删除'})
+
+
+@app.route('/api/qms/links/toggle', methods=['POST'])
+@login_required
+@handle_api_error
+def toggle_qms_link():
+    """启用/停用一条连接"""
+    data = request.get_json() or {}
+    lid = str(data.get('id') or '')
+    if not lid:
+        return jsonify({'success': False, 'message': '缺少连接 ID'})
+    cfg = qms_load_cfg()
+    links = qms_get_links(cfg)
+    found = False
+    for l in links:
+        if l['id'] == lid:
+            l['enabled'] = bool(data.get('enabled', not l.get('enabled', True)))
+            found = True
+    if not found:
+        return jsonify({'success': False, 'message': '连接不存在'})
+    cfg['links'] = links
+    qms_save_cfg(cfg)
+    return jsonify({'success': True, 'message': '已更新'})
+
+
+@app.route('/api/qms/links/trigger', methods=['POST'])
+@login_required
+@handle_api_error
+def trigger_qms_link():
+    """手动触发一条连接（记日志）"""
+    data = request.get_json() or {}
+    lid = str(data.get('id') or '')
+    cfg = qms_load_cfg()
+    link = next((l for l in qms_get_links(cfg) if l['id'] == lid), None)
+    if not link:
+        return jsonify({'success': False, 'message': '连接不存在'})
+    result = qms_trigger_link(link, source='manual')
+    cfg = qms_load_cfg()
+    cfg['last_trigger_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    cfg['last_trigger_result'] = qms_build_summary([result])
+    cfg['last_trigger_task'] = link.get('task_name') or ''
+    cfg['last_trigger_ok'] = bool(result.get('ok'))
+    qms_save_cfg(cfg)
+    return jsonify({
+        'success': bool(result.get('ok')),
+        'message': qms_build_summary([result]),
+        'result': result,
+    })
+
+
+@app.route('/api/qms/logs', methods=['GET'])
+@login_required
+@handle_api_error
+def list_qms_logs():
+    """某条连接的触发日志（默认最近 30 条）"""
+    link_id = request.args.get('link_id') or ''
+    try:
+        limit = int(request.args.get('limit') or 30)
+    except (TypeError, ValueError):
+        limit = 30
+    return jsonify({'success': True, 'logs': qms_get_logs(link_id, limit=limit)})
+
+
+@app.route('/api/qms/start', methods=['POST'])
+@login_required
+@handle_api_error
+def start_qms_scrape():
+    """手动触发 QMediaSync 刮削任务"""
+    data = request.get_json() or {}
+    cfg = qms_load_cfg()
+    links = [l for l in qms_get_links(cfg) if l.get('enabled', True)]
+    if data.get('ids'):
+        # 兼容按序号直接触发（无法定位连接时不写日志）
+        try:
+            results = QmsClient(cfg).start(data.get('ids'))
+        except QmsError as e:
+            return jsonify({'success': False, 'message': str(e)})
+        except Exception as e:
+            return jsonify({'success': False, 'message': f'触发失败：{e}'})
+    else:
+        if not links:
+            return jsonify({'success': False, 'message': '没有启用的连接'})
+        results = [qms_trigger_link(l, source='manual') for l in links]
+    summary = qms_build_summary(results)
+    cfg['last_trigger_at'] = time.strftime('%Y-%m-%d %H:%M:%S')
+    cfg['last_trigger_result'] = summary
+    cfg['last_trigger_ok'] = all(r.get('ok') for r in results)
+    qms_save_cfg(cfg)
+    return jsonify({
+        'success': any(r.get('ok') for r in results),
+        'message': summary,
+        'results': results,
+    })
+
+
+@app.route('/api/task/history/<int:task_id>', methods=['GET'])
+@login_required
+@handle_api_error
+def get_task_history(task_id):
+    """获取任务最近10次转存历史（SQLite）"""
+    if not storage:
+        return jsonify({'success': False, 'message': '存储未初始化'})
+    tasks = storage.config.get('baidu', {}).get('tasks', [])
+    task_order = task_id + 1  # 前端task_id从0开始，order从1开始
+    task = next((t for t in tasks if t.get('order') == task_order), None)
+    if not task:
+        return jsonify({'success': False, 'message': f'未找到任务(order={task_order})'})
+    from history_db import get_task_history as db_get
+    return jsonify({'success': True, 'history': db_get(task_uid=task.get('task_uid'), order=task_order)})
 
 @app.route('/api/task/log/<int:task_id>', methods=['GET'])
 @login_required

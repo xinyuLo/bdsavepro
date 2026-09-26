@@ -54,6 +54,7 @@ export const PAGE_TITLES = {
   DASHBOARD: '仪表盘',
   TASKS: '任务管理',
   USERS: '用户管理', 
+  QMS: '连接QMediaSync',
   SETTINGS: '系统设置',
   LOGS: '日志查看'
 } as const

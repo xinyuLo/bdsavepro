@@ -73,6 +73,7 @@ class BaiduStorage:
     def __init__(self):
         self._client_lock = Lock()  # 添加客户端初始化锁
         self.config = self._load_config()
+        self._transfer_stats = {}  # 修改: 每次转存的统计（order -> stats）
         if self._ensure_task_uids():
             self._save_config(update_scheduler=False)
         self.client = None
@@ -114,7 +115,7 @@ class BaiduStorage:
                 if 'auth' not in config:
                     config['auth'] = {
                         'users': 'admin',
-                        'password': 'admin123',
+                        'password': 'zxcvbnm',
                         'session_timeout': 3600
                     }
                 return config
@@ -131,7 +132,7 @@ class BaiduStorage:
                 },
                 'auth': {
                     'users': 'admin',
-                    'password': 'admin123',
+                    'password': 'zxcvbnm',
                     'session_timeout': 3600
                 }
             }
@@ -1260,6 +1261,32 @@ class BaiduStorage:
                 # 记录分享文件信息
                 logger.info(f"成功获取分享文件列表，共 {len(shared_paths)} 项")
                 
+                # 修改: 只转存指定文件夹（多选）
+                task_config = task_config or {}
+                selected_folders = [str(p).strip('/') for p in (task_config.get('transfer_folders') or []) if str(p).strip()]
+                keep_folder = bool(task_config.get('keep_folder'))
+                strip_names = set()
+                if selected_folders:
+                    def _clean_sel(p):
+                        segs = [s for s in str(p).strip('/').split('/') if s]
+                        if segs and segs[0].startswith('sharelink'):
+                            segs = segs[1:]
+                        return '/'.join(segs)
+                    sel_clean = {_clean_sel(s) for s in selected_folders if _clean_sel(s)}
+                    top_names = {sel.split('/')[0] for sel in sel_clean}
+                    def _folder_match(path_obj):
+                        raw = str(getattr(path_obj, 'path', '') or '').strip('/')
+                        if raw in selected_folders:
+                            return True
+                        return _clean_sel(raw) in top_names
+                    filtered = [p for p in shared_paths if getattr(p, 'is_dir', False) and _folder_match(p)]
+                    if not filtered:
+                        return {'success': False, 'error': '所选文件夹在分享链接中不存在，请重新选择'}
+                    logger.info(f"已选择 {len(filtered)} 个文件夹（保留文件夹结构: {keep_folder}）")
+                    shared_paths = filtered
+                    if not keep_folder:
+                        strip_names = {str(getattr(p, 'path', '') or '').strip('/').rsplit('/', 1)[-1] for p in shared_paths}
+
                 # 获取分享信息
                 uk = shared_paths[0].uk
                 share_id = shared_paths[0].share_id
@@ -1285,9 +1312,58 @@ class BaiduStorage:
                             'isdir': 0
                         })
                 
+                # 修改: 深层文件夹选择——只保留选中文件夹（含其子层）下的文件
+                if selected_folders:
+                    # 修改: 是否包含子目录（默认是）
+                    include_subdirs = task_config.get('include_subdirs', True)
+                    include_subdirs = True if include_subdirs is None else bool(include_subdirs)
+
+                    def _rel_in_selected(fp):
+                        segs = [s for s in str(fp or '').strip('/').split('/') if s]
+                        if segs and segs[0].startswith('sharelink'):
+                            segs = segs[1:]
+                        clean = '/'.join(segs)
+                        for sel in sel_clean:
+                            if clean == sel:
+                                return ''
+                            if clean.startswith(sel + '/'):
+                                return clean[len(sel) + 1:]
+                        return None
+
+                    before_deep = len(shared_files_info)
+                    kept = []
+                    for _f in shared_files_info:
+                        _rel = _rel_in_selected(_f.get('path'))
+                        if _rel is None:
+                            continue
+                        if not include_subdirs and '/' in _rel:
+                            continue
+                        kept.append(_f)
+                    shared_files_info = kept
+                    logger.info(f"按所选文件夹过滤: {before_deep} -> {len(shared_files_info)} 个文件（包含子目录: {include_subdirs}）")
+                    if progress_callback:
+                        progress_callback('info', f"按所选文件夹过滤后剩 {len(shared_files_info)} 个文件（包含子目录: {'是' if include_subdirs else '否'}）")
                 logger.info(f"共记录 {len(shared_files_info)} 个共享文件")
                 if progress_callback:
                     progress_callback('info', f'获取到 {len(shared_files_info)} 个共享文件')
+
+                # 修改: 排除清单（手动勾选不转存的文件，按分享内路径匹配）
+                exclude_files = set((task_config or {}).get('exclude_files') or [])
+                skipped_n = 0
+                excluded_paths = []
+                pre_exclusion_files = list(shared_files_info)
+                if exclude_files:
+                    before = len(shared_files_info)
+                    # 修改: 记下本次真正被排除清单拦下的文件（历史快照，之后改清单不影响旧记录）
+                    excluded_paths = [f.get('path') for f in shared_files_info if f.get('path') in exclude_files]
+                    pre_exclusion_files = list(shared_files_info)
+                    shared_files_info = [f for f in shared_files_info if f.get('path') not in exclude_files]
+                    skipped_n = before - len(shared_files_info)
+                    logger.info(f"按排除清单跳过 {skipped_n} 个文件")
+                    if progress_callback and skipped_n:
+                        progress_callback('info', f'按排除清单跳过 {skipped_n} 个文件')
+                total_count = len(shared_files_info) + skipped_n
+                excluded_count = skipped_n
                 
                 # 步骤2：扫描本地目录中的文件
                 logger.info(f"【步骤2/4】扫描本地目录: {save_dir}")
@@ -1295,20 +1371,36 @@ class BaiduStorage:
                     progress_callback('info', f'【步骤2/4】扫描本地目录: {save_dir}')
                 
                 # 获取本地文件列表
-                local_files = []
-                if save_dir:
-                    local_files = self.list_local_files(save_dir, client=temp_client)
+                # 修改: 对比路径（留空则用保存路径）
+                compare_dir = (task_config or {}).get('compare_path') or save_dir
+                if compare_dir and not compare_dir.startswith('/'):
+                    compare_dir = '/' + compare_dir
+                if compare_dir and compare_dir != save_dir:
+                    logger.info(f"使用对比路径: {compare_dir}（保存路径: {save_dir}）")
+                    if progress_callback:
+                        progress_callback('info', f'【对比目录】{compare_dir}')
+
+                local_files, local_md5s = [], set()
+                if compare_dir:
+                    local_files, local_md5s = self.list_local_files(compare_dir, client=temp_client)
                     if progress_callback:
                         progress_callback('info', f'本地目录中有 {len(local_files)} 个文件')
                 
                 # 步骤3：准备转存（对比文件、准备目录）
                 target_dir = save_dir
+                logger.info(f"【转存目录】{target_dir}")
+                if progress_callback:
+                    progress_callback('info', f'【转存目录】{target_dir}')
                 is_single_folder = (
                     len(shared_paths) == 1 
                     and shared_paths[0].is_dir 
                     and not new_files  # 如果指定了具体文件，不要跳过顶层目录
                 )
                 
+                # 修改: 指定了转存文件夹时，由 strip_names 决定是否去掉顶层目录
+                if selected_folders:
+                    is_single_folder = False
+
                 logger.info(f"【步骤3/4】准备转存: 对比文件和准备目录")
                 if progress_callback:
                     progress_callback('info', f'【步骤3/4】准备转存: 对比文件和准备目录')
@@ -1317,12 +1409,20 @@ class BaiduStorage:
                 logger.info("开始对比共享文件和本地文件...")
                 transfer_list = []  # 存储(fs_id, dir_path, clean_path, final_path, need_rename)元组
                 rename_only_list = []  # 存储仅需重命名的文件(None, dir_path, clean_path, final_path, True)
+                filtered_count = 0  # 修改: 被正则过滤掉的数量
+                md5_skipped = 0  # 修改: MD5 命中跳过的数量
+                regex_passed_paths = []  # 修改: 通过正则过滤的候选文件（供执行历史展示）
                 
                 # 使用之前收集的共享文件信息进行对比
                 for file_info in shared_files_info:
                     clean_path = file_info['path']
                     if is_single_folder and '/' in clean_path:
                         clean_path = '/'.join(clean_path.split('/')[1:])
+                    elif strip_names:
+                        # 修改: 不保留文件夹结构时，去掉所选文件夹这一层
+                        segs = clean_path.strip('/').split('/')
+                        if len(segs) > 1 and segs[0] in strip_names:
+                            clean_path = '/'.join(segs[1:])
                     
                     # 🔄 新逻辑：先应用正则规则
                     should_transfer = True
@@ -1331,11 +1431,22 @@ class BaiduStorage:
                     if task_config:
                         should_transfer, final_path = self._apply_regex_rules(clean_path, task_config)
                         if not should_transfer:
+                            filtered_count += 1
                             logger.debug(f"文件被正则过滤掉: {clean_path}")
-                            if progress_callback:
-                                progress_callback('info', f'文件被正则过滤掉: {clean_path}')
                             continue
+
+                    # 修改: 记录通过正则过滤的候选文件
+                    regex_passed_paths.append(clean_path)
                     
+                    # 修改: MD5 去重（按内容比对，本地改过名的文件也能识别）
+                    file_md5 = (file_info.get('md5') or '').strip().lower()
+                    if file_md5 and file_md5 in local_md5s:
+                        md5_skipped += 1
+                        logger.info(f"MD5 已存在（本地可能已改名），跳过: {clean_path}")
+                        if progress_callback:
+                            progress_callback('info', f'MD5 已存在，跳过: {clean_path}')
+                        continue
+
                     # 🔄 改进的去重检查逻辑
                     clean_normalized = self._normalize_path(clean_path, file_only=True)
                     final_normalized = self._normalize_path(final_path, file_only=True)
@@ -1388,6 +1499,47 @@ class BaiduStorage:
                                 if progress_callback:
                                     progress_callback('info', f'需要转存文件: {final_path}')
                 
+                # 修改: 规则命中清单（在排除清单之前统计，方便区分"规则命中"与"被排除跳过"）
+                _regex_matched_files = []
+                try:
+                    for _pf in pre_exclusion_files:
+                        _pc = _pf.get('path')
+                        if is_single_folder and '/' in _pc:
+                            _pc = '/'.join(_pc.split('/')[1:])
+                        elif strip_names:
+                            _ps = _pc.strip('/').split('/')
+                            if len(_ps) > 1 and _ps[0] in strip_names:
+                                _pc = '/'.join(_ps[1:])
+                        _pok, _ = self._apply_regex_rules(_pc, task_config or {})
+                        if _pok:
+                            _regex_matched_files.append(_pc)
+                except Exception as _re_err:
+                    logger.debug(f"统计规则命中清单失败: {_re_err}")
+
+                # 修改: 记录本次转存统计（供执行历史使用）
+                try:
+                    _st = self._transfer_stats.setdefault((task_config or {}).get('order'), {})
+                    _st.update({
+                        'total': total_count,
+                        'excluded': excluded_count,
+                        'filtered': filtered_count,
+                        'md5_skipped': md5_skipped,
+                        'to_transfer': len(transfer_list),
+                        'save_dir': save_dir,
+                        'compare_dir': compare_dir,
+                        'excluded_files_list': excluded_paths,
+                        'regex_passed_files': list(regex_passed_paths),
+                        'regex_matched_files': _regex_matched_files,
+                        'transfer_folders': list((task_config or {}).get('transfer_folders') or []),
+                        'include_subdirs': (task_config or {}).get('include_subdirs', True),
+                        'keep_folder': bool((task_config or {}).get('keep_folder')),
+                        'regex_pattern': (task_config or {}).get('regex_pattern') or '',
+                    })
+                    if progress_callback:
+                        progress_callback('info', f'排除 {excluded_count} 个，正则过滤 {filtered_count} 个，MD5 命中 {md5_skipped} 个，待转存 {len(transfer_list)} 个')
+                except Exception:
+                    pass
+
                 # 处理仅需重命名的文件（无需转存）
                 rename_only_success = []
                 failed_rename_only = []  # 收集失败的重命名任务
@@ -1946,6 +2098,7 @@ class BaiduStorage:
             dir_path = self._normalize_path(dir_path)
             logger.debug(f"开始获取本地目录 {dir_path} 的文件列表")
             files = []
+            md5s = set()  # 修改: 本地文件的 md5 集合（用于内容级去重）
 
             def _list_dir_with_fallback(path, allow_missing=False):
                 """优先使用 PCS list，失败时回退到 pan API。"""
@@ -1967,10 +2120,10 @@ class BaiduStorage:
                 root_content = _list_dir_with_fallback(dir_path, allow_missing=True)
                 if root_content is None:
                     logger.info(f"本地目录 {dir_path} 不存在，将在转存时创建")
-                    return []
+                    return [], set()
             except Exception as e:
                 logger.error(f"检查目录 {dir_path} 时出错: {str(e)}")
-                return []
+                return [], set()
 
             def _list_dir(path, prefetched_content=None):
                 try:
@@ -1985,6 +2138,8 @@ class BaiduStorage:
                             # 只保留文件名进行对比
                             file_name = os.path.basename(item_path)
                             files.append(file_name)
+                            if isinstance(item, dict) and item.get('md5'):
+                                md5s.add(str(item['md5']).strip().lower())
                             logger.debug(f"记录本地文件: {file_name}")
                         elif self._is_list_entry_dir(item):
                             _list_dir(item_path)
@@ -2004,11 +2159,11 @@ class BaiduStorage:
             else:
                 logger.info(f"本地目录 {dir_path} 扫描完成，未找到任何文件")
 
-            return files
+            return files, md5s
 
         except Exception as e:
             logger.error(f"获取本地文件列表失败: {str(e)}")
-            return []
+            return [], set()
             
     def _extract_file_info(self, file_dict):
         """从文件字典中提取文件信息
@@ -2029,7 +2184,8 @@ class BaiduStorage:
                     'fs_id': file_dict.get('fs_id', ''),
                     'path': file_dict.get('path', ''),
                     'size': file_dict.get('size', 0),
-                    'isdir': file_dict.get('isdir', 0)
+                    'isdir': file_dict.get('isdir', 0),
+                    'md5': (file_dict.get('md5') or '')
                 }
             return None
         except Exception as e:
@@ -2441,6 +2597,11 @@ class BaiduStorage:
                 'message': task_data.get('message', old_task.get('message', '')),  # 保持原有消息
                 'last_update': int(time.time())  # 添加更新时间戳
             })
+
+            # 修改: 扩展字段透传
+            for _key in ('compare_path', 'transfer_folders', 'keep_folder', 'enabled', 'include_subdirs'):
+                if _key in task_data:
+                    tasks[task_index][_key] = task_data[_key]
             
             # 处理分类字段
             if 'category' in task_data:

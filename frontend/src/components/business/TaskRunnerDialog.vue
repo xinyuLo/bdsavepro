@@ -69,6 +69,17 @@
         </div>
       </div>
 
+      <!-- 排除文件列表 -->
+      <div v-if="task && task.exclude_files && task.exclude_files.length > 0" class="files-section">
+        <h3 class="section-title">排除文件 ({{ task.exclude_files.length }}，本次不转存)</h3>
+        <div class="files-list">
+          <div v-for="(file, index) in task.exclude_files" :key="'ex' + index" class="file-item">
+            <el-icon class="file-icon"><Remove /></el-icon>
+            <span class="file-name">{{ file }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 转存文件列表 -->
       <div v-if="transferredFiles && transferredFiles.length > 0" class="files-section">
         <h3 class="section-title">转存文件 ({{ transferredFiles.length }})</h3>

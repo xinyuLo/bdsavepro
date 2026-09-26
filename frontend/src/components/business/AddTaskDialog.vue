@@ -2,7 +2,7 @@
   <el-dialog
     v-model="visible"
     :title="editingTask ? '编辑任务' : '添加任务'"
-    width="650px"
+    width="760px"
     :close-on-click-modal="false"
     class="add-task-dialog"
     :lock-scroll="false"
@@ -11,7 +11,7 @@
       ref="formRef"
       :model="form"
       :rules="formRules"
-      label-width="80px"
+      label-width="96px"
       @submit.prevent="handleSubmit"
     >
       <el-form-item label="任务名称" prop="name">
@@ -43,6 +43,7 @@
             clearable
             value-key="value"
             class="path-select"
+            style="width: 100%; min-width: 320px"
           />
           <el-switch
             v-model="pathNameSync"
@@ -54,6 +55,43 @@
         </div>
       </el-form-item>
       
+      <el-form-item label="对比路径" prop="compare_path">
+        <el-input
+          v-model="form.compare_path"
+          placeholder="可选，点“选择”从网盘目录里挑"
+          clearable
+        >
+          <template #append>
+            <el-button :loading="netdiskLoading" @click="openNetdiskPicker">选择</el-button>
+          </template>
+        </el-input>
+        <div class="form-help">
+          按“文件过滤”规则筛出来的文件，会跟这个目录里的文件比对，已存在的自动跳过；留空则跟“保存路径”比对。
+        </div>
+      </el-form-item>
+
+      <el-form-item label="转存文件夹">
+        <el-input
+          :model-value="transferFoldersDisplay"
+          placeholder="不选 = 转存整个分享链接"
+          readonly
+        >
+          <template #append>
+            <el-button :loading="loadingFolders" :disabled="!form.url" @click="openFolderPicker()">选择</el-button>
+          </template>
+        </el-input>
+        <div class="form-help">
+          填好转存链接后点“选择”，读取链接里的文件夹，可多选，只转存选中的文件夹；不选则按原逻辑转存整条链接。
+        </div>
+      </el-form-item>
+
+      <el-form-item label="保存文件夹">
+        <el-switch v-model="form.keep_folder" />
+        <div class="form-help">
+          仅在上面选了文件夹时生效：选“否”，文件夹里的内容直接存到保存路径下；选“是”，连文件夹本身一起存过来。
+        </div>
+      </el-form-item>
+
       <el-form-item label="分类" prop="category">
         <el-autocomplete
           v-model="form.category"
@@ -118,6 +156,72 @@
       </div>
     </template>
   </el-dialog>
+
+  <el-dialog
+    v-model="folderPickerVisible"
+    title="选择要转存的文件夹"
+    width="560px"
+    append-to-body
+  >
+    <div class="netdisk-nav">
+      <el-button size="small" :disabled="folderNavPath === ''" @click="folderGoUp">返回上级</el-button>
+      <span class="netdisk-current">{{ folderNavPath || '分享根目录' }}</span>
+    </div>
+    <div v-if="loadingFolders" class="folder-loading">正在读取分享文件夹…</div>
+    <template v-else>
+      <div class="folder-subdir-row">
+        <span class="folder-subdir-label">包含子目录</span>
+        <el-switch v-model="form.include_subdirs" />
+        <span class="folder-subdir-tip">
+          {{ form.include_subdirs ? '子文件夹及其中的文件一起转存' : '只转存该文件夹下的文件，不含子文件夹' }}
+        </span>
+      </div>
+      <div class="exclude-tip">点击文件夹名可进入下一层；勾选 = 转存这个文件夹</div>
+      <el-empty v-if="shareFolders.length === 0" description="该目录下没有子文件夹" :image-size="70" />
+      <el-checkbox-group v-else v-model="form.transfer_folders">
+        <div v-for="f in shareFolders" :key="f.path" class="folder-item">
+          <el-checkbox :label="f.path" />
+          <a class="folder-name-link" @click.prevent="enterShareFolder(f)">{{ f.name }}</a>
+        </div>
+      </el-checkbox-group>
+    </template>
+    <template #footer>
+      <el-button @click="folderPickerVisible = false">取消</el-button>
+      <el-button type="primary" :disabled="loadingFolders" @click="folderPickerVisible = false">确定</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="netdiskPickerVisible"
+    title="选择网盘目录（对比路径）"
+    width="560px"
+    append-to-body
+  >
+    <div class="netdisk-nav">
+      <el-button
+        size="small"
+        :disabled="netdiskPath === '/'"
+        @click="loadNetdiskFolders(netdiskParent)"
+      >
+        返回上级
+      </el-button>
+      <span class="netdisk-current">{{ netdiskPath }}</span>
+    </div>
+    <div v-if="netdiskLoading" class="folder-loading">正在读取网盘目录…</div>
+    <el-empty v-else-if="netdiskFolders.length === 0" description="该目录下没有子文件夹" :image-size="70" />
+    <ul v-else class="netdisk-list">
+      <li v-for="f in netdiskFolders" :key="f.path" class="netdisk-item">
+        <el-button link @click="loadNetdiskFolders(f.path)">
+          <el-icon><Folder /></el-icon>
+          {{ f.name }}
+        </el-button>
+      </li>
+    </ul>
+    <template #footer>
+      <el-button @click="netdiskPickerVisible = false">取消</el-button>
+      <el-button type="primary" :disabled="netdiskLoading" @click="pickNetdiskPath">选这个目录</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
@@ -169,7 +273,11 @@ const form = reactive({
   category: '',
   cron: '',
   regex_pattern: '',
-  regex_replace: ''
+  regex_replace: '',
+  compare_path: '',
+  transfer_folders: [] as string[],
+  keep_folder: false,
+  include_subdirs: true
 })
 
 // 高级设置折叠面板状态
@@ -206,6 +314,10 @@ const resetForm = () => {
   form.cron = ''
   form.regex_pattern = ''
   form.regex_replace = ''
+  form.compare_path = ''
+  form.transfer_folders = []
+  form.keep_folder = false
+  form.include_subdirs = true
   pathNameSync.value = true // 重置开关状态
   formRef.value?.resetFields()
 }
@@ -339,6 +451,10 @@ const loadTaskData = (task: Task) => {
   form.cron = task.cron || ''
   form.regex_pattern = task.regex_pattern || ''
   form.regex_replace = task.regex_replace || ''
+  form.compare_path = task.compare_path || ''
+  form.transfer_folders = Array.isArray(task.transfer_folders) ? [...task.transfer_folders] : []
+  form.keep_folder = !!task.keep_folder
+  form.include_subdirs = task.include_subdirs === undefined ? true : !!task.include_subdirs
   
   // 编辑任务时禁用同步开关，避免意外修改路径
   pathNameSync.value = false
@@ -365,6 +481,101 @@ const showCronHelper = () => {
       </div>
     `
   })
+}
+
+// 转存文件夹选择
+const folderPickerVisible = ref(false)
+const loadingFolders = ref(false)
+const shareFolders = ref<{ name: string; path: string }[]>([])
+
+// 网盘目录选择（对比路径）
+const netdiskPickerVisible = ref(false)
+const netdiskLoading = ref(false)
+const netdiskPath = ref('/')
+const netdiskParent = ref('/')
+const netdiskFolders = ref<{ name: string; path: string }[]>([])
+
+const loadNetdiskFolders = async (path: string) => {
+  netdiskLoading.value = true
+  try {
+    const res = await apiService.listNetdiskFolders({ path })
+    if (res.success) {
+      netdiskPath.value = (res as any).path || path
+      netdiskParent.value = (res as any).parent || '/'
+      netdiskFolders.value = ((res as any).folders || []) as { name: string; path: string }[]
+    } else {
+      ElMessage.error((res as any).message || '读取网盘目录失败')
+    }
+  } catch {
+    ElMessage.error('读取网盘目录失败')
+  } finally {
+    netdiskLoading.value = false
+  }
+}
+
+const openNetdiskPicker = () => {
+  netdiskPickerVisible.value = true
+  loadNetdiskFolders(form.compare_path || '/')
+}
+
+const pickNetdiskPath = () => {
+  form.compare_path = netdiskPath.value
+  netdiskPickerVisible.value = false
+}
+
+const transferFoldersDisplay = computed(() =>
+  form.transfer_folders
+    .map((p) => p.split('/').filter((s) => s).pop() || p)
+    .join('、')
+)
+
+const folderNavPath = ref('')
+const folderNavStack = ref<string[]>([])
+
+const loadShareFolders = async (subPath = '') => {
+  loadingFolders.value = true
+  try {
+    const pwdMatch = /(?:[?&])pwd=([^&]+)/.exec(form.url || '')
+    const res = await apiService.listShareFolders({
+      url: form.url,
+      pwd: pwdMatch ? pwdMatch[1] : '',
+      path: subPath || undefined
+    })
+    if (res.success) {
+      shareFolders.value = ((res as any).folders || []) as { name: string; path: string }[]
+    } else {
+      ElMessage.error((res as any).message || '读取文件夹失败')
+    }
+  } catch {
+    ElMessage.error('读取文件夹失败')
+  } finally {
+    loadingFolders.value = false
+  }
+}
+
+const openFolderPicker = async () => {
+  if (!form.url) {
+    ElMessage.warning('请先填写转存链接')
+    return
+  }
+  folderPickerVisible.value = true
+  folderNavPath.value = ''
+  folderNavStack.value = []
+  shareFolders.value = []
+  await loadShareFolders('')
+}
+
+const enterShareFolder = async (f: { path: string; name: string }) => {
+  folderNavStack.value.push(folderNavPath.value)
+  folderNavPath.value = f.path
+  shareFolders.value = []
+  await loadShareFolders(f.path)
+}
+
+const folderGoUp = async () => {
+  folderNavPath.value = folderNavStack.value.pop() || ''
+  shareFolders.value = []
+  await loadShareFolders(folderNavPath.value)
 }
 
 const handleSubmit = async () => {
@@ -698,5 +909,79 @@ watch(pathNameSync, (newValue) => {
     width: 100% !important;
     margin-top: 8px !important;
   }
+}
+.folder-item {
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* el-checkbox 未给插槽时会把 label 当文字渲染（显示成整条路径），这里藏掉，
+   只保留我们自己渲染的文件夹名链接 */
+.folder-item :deep(.el-checkbox__label) {
+  display: none;
+}
+
+.folder-name-link {
+  color: #409eff;
+  cursor: pointer;
+  user-select: none;
+  font-size: 14px;
+}
+
+.folder-name-link:hover {
+  text-decoration: underline;
+}
+
+.folder-subdir-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid #ebeef5;
+  margin-bottom: 10px;
+}
+
+.folder-subdir-label {
+  font-size: 14px;
+  color: #303133;
+}
+
+.folder-subdir-tip {
+  font-size: 12px;
+  color: #909399;
+}
+
+.folder-loading {
+  padding: 20px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 14px;
+}
+/* 网盘目录选择 */
+.netdisk-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.netdisk-current {
+  font-size: 13px;
+  color: #606266;
+  word-break: break-all;
+}
+
+.netdisk-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.netdisk-item {
+  padding: 3px 0;
 }
 </style>

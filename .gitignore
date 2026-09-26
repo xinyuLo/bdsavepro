@@ -55,3 +55,24 @@ build/
 .omc/
 .claude/worktrees/
 127.0.0.1/
+
+# ===== 凭据（真实 cookie 只存在宿主挂载目录，绝不入库） =====
+cookies.txt
+*.cookie
+cookies*.json
+
+# ===== 配置与数据库（运行时生成） =====
+config/config.json
+*.db
+*.db-wal
+*.db-shm
+
+# ===== AI 工具残留 =====
+.playwright-mcp/
+.serena/
+.spec-workflow/
+.claude/
+.omc/
+
+# ===== 构建产物 =====
+frontend/dist/

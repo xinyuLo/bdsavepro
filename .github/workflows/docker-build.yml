@@ -1,0 +1,99 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+      - 'NOTICE'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.dockerignore'
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: '目标架构（arm64 走 QEMU 模拟，会明显变慢）'
+        type: choice
+        options:
+          - linux/amd64
+          - linux/amd64,linux/arm64
+        default: linux/amd64
+      push_image:
+        description: '构建完成后推送到 GHCR'
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 计算镜像名（GHCR 要求全小写）
+        id: img
+        run: |
+          NAME=$(echo "${{ github.repository_owner }}/bdsavepro" | tr '[:upper:]' '[:lower:]')
+          echo "name=$NAME" >> $GITHUB_OUTPUT
+          echo "镜像名: $NAME"
+
+      - name: 读取前端版本号
+        id: ver
+        run: |
+          VERSION=$(jq -r '.version' frontend/package.json)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "版本: $VERSION"
+
+      - name: 决定目标架构与是否推送
+        id: cfg
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "platforms=${{ inputs.platforms }}" >> $GITHUB_OUTPUT
+            echo "push=${{ inputs.push_image }}" >> $GITHUB_OUTPUT
+          else
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
+            echo "push=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up QEMU
+        if: contains(steps.cfg.outputs.platforms, 'arm64')
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        if: steps.cfg.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=v${{ steps.ver.outputs.version }}
+            type=sha,prefix=sha-,format=short
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ steps.cfg.outputs.platforms }}
+          push: ${{ steps.cfg.outputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

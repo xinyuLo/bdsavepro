@@ -45,7 +45,7 @@ import { computed, type Component } from 'vue'
 import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useTaskStore, useUserStore } from '@/stores'
-import { Plus, Odometer, List, User, Setting } from '@element-plus/icons-vue'
+import { Plus, Odometer, List, User, Setting, Link } from '@element-plus/icons-vue'
 
 // Props & Emits
 interface Emits {
@@ -76,6 +76,12 @@ const navItems = computed(() => [
     icon: List,
     label: '任务',
     badge: taskStats.value.running
+  },
+  {
+    path: '/qms',
+    icon: Link,
+    label: 'QMS',
+    badge: 0
   },
   {
     path: '/users',

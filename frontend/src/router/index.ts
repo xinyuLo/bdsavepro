@@ -9,6 +9,7 @@ const DashboardView = () => import('@/views/dashboard/DashboardView.vue')
 const TasksView = () => import('@/views/tasks/TasksView.vue')
 const UsersView = () => import('@/views/users/UsersView.vue')
 const SettingsView = () => import('@/views/settings/SettingsView.vue')
+const QmsView = () => import('@/views/qms/QmsView.vue')
 
 const routes = [
   {
@@ -53,6 +54,16 @@ const routes = [
       title: PAGE_TITLES.USERS,
       requiresAuth: true,
       icon: 'User'
+    }
+  },
+  {
+    path: '/qms',
+    name: 'Qms',
+    component: QmsView,
+    meta: {
+      title: PAGE_TITLES.QMS,
+      requiresAuth: true,
+      icon: 'Link'
     }
   },
   {

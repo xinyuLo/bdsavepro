@@ -1,0 +1,35 @@
+# ===== 凭据与运行时数据：绝不进镜像 =====
+# 百度账号 cookies / 配置（真实凭据只存放在宿主的挂载目录里）
+config/config.json
+config/*.db
+config/*.db-*
+config/*.log
+cookies.txt
+*.cookie
+.env
+.env.*
+
+# ===== 日志 =====
+log/
+*.log
+
+# ===== 版本控制 / Python 缓存 =====
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ===== 编辑器与工具残留 =====
+.claude/
+.serena/
+.spec-workflow/
+.playwright-mcp/
+.venv/
+venv/
+.cache/
+
+# ===== 构建产物（镜像内由 multistage 生成） =====
+frontend/dist/
+frontend/node_modules/

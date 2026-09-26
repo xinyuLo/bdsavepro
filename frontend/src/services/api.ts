@@ -29,6 +29,30 @@ export class ApiService {
     return httpClient.post('/api/task/execute', { task_id: taskId })
   }
 
+  async toggleTask(taskId: number): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/task/toggle', { task_id: taskId })
+  }
+
+  async getTaskHistory(taskId: number): Promise<ApiResponse<any>> {
+    return httpClient.get(`/api/task/history/${taskId}`)
+  }
+
+  async listShareFolders(data: { url: string; pwd?: string; path?: string }): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/share/folders', data)
+  }
+
+  async getFilteredShareFiles(data: { url: string; pwd?: string; task_id: number }): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/share/filtered-files', data)
+  }
+
+  async listNetdiskFolders(data: { path?: string }): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/netdisk/folders', data)
+  }
+
+  async setTaskExcludes(taskId: number, files: string[]): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/task/exclude', { task_id: taskId, files })
+  }
+
   async executeBatchTasks(taskIds: number[]): Promise<ApiResponse<any>> {
     return httpClient.post('/api/tasks/execute-all', { task_ids: taskIds })
   }
@@ -120,6 +144,55 @@ export class ApiService {
 
   async getTaskLog(taskId: number): Promise<ApiResponse<any>> {
     return httpClient.get(`/api/task/log/${taskId}`)
+  }
+
+  // QMediaSync 相关
+  async getQmsConfig(): Promise<ApiResponse<any>> {
+    return httpClient.get('/api/qms/config')
+  }
+
+  async saveQmsConfig(data: any): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/config', data)
+  }
+
+  async revealQmsKey(): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/reveal')
+  }
+
+  async testQms(data: any = {}): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/test', data)
+  }
+
+  async getQmsPaths(data: any = {}): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/paths', data)
+  }
+
+  async startQms(data: any): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/start', data)
+  }
+
+  async getQmsLinks(): Promise<ApiResponse<any>> {
+    return httpClient.get('/api/qms/links')
+  }
+
+  async createQmsLink(data: any): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/links', data)
+  }
+
+  async triggerQmsLink(id: string): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/links/trigger', { id })
+  }
+
+  async getQmsLogs(linkId: string, limit = 30): Promise<ApiResponse<any>> {
+    return httpClient.get(`/api/qms/logs?link_id=${encodeURIComponent(linkId)}&limit=${limit}`)
+  }
+
+  async deleteQmsLink(id: string): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/links/delete', { id })
+  }
+
+  async toggleQmsLink(id: string, enabled: boolean): Promise<ApiResponse<any>> {
+    return httpClient.post('/api/qms/links/toggle', { id, enabled })
   }
 
   // 认证相关API

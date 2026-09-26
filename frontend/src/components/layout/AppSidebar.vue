@@ -65,6 +65,12 @@
             </template>
           </el-menu-item>
           
+          <!-- 连接 QMediaSync -->
+          <el-menu-item index="/qms" class="menu-item">
+            <el-icon><Link /></el-icon>
+            <template #title>连接QMediaSync</template>
+          </el-menu-item>
+          
           <!-- 系统设置 -->
           <el-menu-item index="/settings" class="menu-item">
             <el-icon><Setting /></el-icon>
@@ -152,7 +158,7 @@ import { useTaskStore, useUserStore, useVersionStore } from '@/stores'
 import { usePolling } from '@/composables/usePolling'
 import { APP_VERSION } from '@/config/version'
 import { appStorage } from '@/utils/storage'
-import { Plus, Odometer, List, User, Setting, Download } from '@element-plus/icons-vue'
+import { Plus, Odometer, List, User, Setting, Download, Link } from '@element-plus/icons-vue'
 
 // Props & Emits
 interface Emits {

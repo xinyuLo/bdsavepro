@@ -85,10 +85,10 @@
         @selection-change="handleSelectionChange"
         class="desktop-table"
       >
-        <el-table-column type="selection" class-name="col-selection" />
+        <el-table-column type="selection" class-name="col-selection" width="45" />
         
         <!-- 拖拽手柄列 -->
-        <el-table-column label="排序" class-name="col-drag" align="center">
+        <el-table-column label="排序" class-name="col-drag" align="center" width="60">
           <template #default>
             <div
               class="drag-handle"
@@ -100,9 +100,9 @@
           </template>
         </el-table-column>
         
-        <el-table-column prop="order" label="序号" class-name="col-order" v-if="columnVisible.order" />
+        <el-table-column prop="order" label="序号" class-name="col-order" v-if="columnVisible.order" width="70" />
         
-        <el-table-column prop="name" label="任务名称" class-name="col-name" v-if="columnVisible.name">
+        <el-table-column prop="name" label="任务名称" class-name="col-name" v-if="columnVisible.name" min-width="220">
           <template #default="{ row }">
             <div class="task-name">
               <a 
@@ -118,7 +118,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="分享链接" class-name="col-share" v-if="columnVisible.shareLink">
+        <el-table-column label="分享链接" class-name="col-share" v-if="columnVisible.shareLink" min-width="180">
           <template #default="{ row }">
             <div class="share-link-container">
               <template v-if="row.share_info">
@@ -139,7 +139,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column prop="save_dir" label="保存路径" class-name="col-savedir" v-if="columnVisible.saveDir">
+        <el-table-column prop="save_dir" label="保存路径" class-name="col-savedir" v-if="columnVisible.saveDir" min-width="240">
           <template #default="{ row }">
             <div class="save-dir text-truncate" :title="row.save_dir">
               {{ row.save_dir }}
@@ -147,7 +147,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column prop="category" label="分类" class-name="col-category" v-if="columnVisible.category">
+        <el-table-column prop="category" label="分类" class-name="col-category" v-if="columnVisible.category" width="130">
           <template #default="{ row }">
             <div class="task-category">
               <el-tag v-if="row.category" size="small" type="primary">
@@ -159,7 +159,7 @@
         </el-table-column>
         
         <!-- 定时规则列 -->
-        <el-table-column label="定时规则" class-name="col-cron" v-if="columnVisible.cron">
+        <el-table-column label="定时规则" class-name="col-cron" v-if="columnVisible.cron" width="150">
           <template #default="{ row }">
             <div class="cron-display">
               <el-tag v-if="row.cron" size="small" type="warning">
@@ -170,7 +170,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column prop="message" label="消息" class-name="col-message" v-if="columnVisible.message">
+        <el-table-column prop="message" label="消息" class-name="col-message" v-if="columnVisible.message" min-width="160">
           <template #default="{ row }">
             <div class="task-message text-truncate" :title="row.message">
               {{ row.message || '-' }}
@@ -178,7 +178,7 @@
           </template>
         </el-table-column>
         
-        <el-table-column prop="status" label="状态" class-name="col-status" v-if="columnVisible.status">
+        <el-table-column prop="status" label="状态" class-name="col-status" v-if="columnVisible.status" width="100">
           <template #default="{ row }">
             <el-tag :type="getStatusType(row.status)" size="small">
               {{ getStatusText(row.status) }}
@@ -186,35 +186,269 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="操作" class-name="col-actions">
+        <el-table-column label="启用" class-name="col-enabled" width="80" align="center">
           <template #default="{ row }">
-            <el-button-group size="small">
-              <el-button 
-                type="primary" 
-                @click="executeTask(row.order - 1)"
-                :disabled="row.status === 'running'"
-              >
-                <el-icon><VideoPlay /></el-icon>
-              </el-button>
+            <el-switch
+              :model-value="row.enabled !== false"
+              @change="toggleTaskEnabled(row)"
+            />
+          </template>
+        </el-table-column>
+        
+        <el-table-column label="操作" class-name="col-actions" width="170">
+          <template #default="{ row }">
+            <div class="action-buttons">
+              <el-button-group size="small">
+                <el-button 
+                  type="primary" 
+                  title="立即执行"
+                  @click="executeTask(row.order - 1)"
+                  :disabled="row.status === 'running' || row.enabled === false"
+                >
+                  <el-icon><VideoPlay /></el-icon>
+                </el-button>
+                
+                <el-button title="编辑任务" @click="editTask(row)">
+                  <el-icon><Edit /></el-icon>
+                </el-button>
+                
+                <el-button title="创建分享链接" @click="shareTask(row.order - 1)">
+                  <el-icon><Share /></el-icon>
+                </el-button>
+              </el-button-group>
               
-              <el-button @click="editTask(row)">
-                <el-icon><Edit /></el-icon>
-              </el-button>
-              
-              <el-button @click="shareTask(row.order - 1)">
-                <el-icon><Share /></el-icon>
-              </el-button>
-              
-              <el-button 
-                type="danger" 
-                @click="deleteTask(row.order - 1)"
-              >
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </el-button-group>
+              <el-button-group size="small">
+                <el-button title="转存日志" @click="openTaskLog(row)">
+                  <el-icon><Tickets /></el-icon>
+                </el-button>
+                
+                <el-button title="排除文件" @click="openExcludeDialog(row)">
+                  <el-icon><Remove /></el-icon>
+                </el-button>
+                
+                <el-button 
+                  type="danger" 
+                  title="删除任务"
+                  @click="deleteTask(row.order - 1)"
+                >
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </el-button-group>
+            </div>
           </template>
         </el-table-column>
       </el-table>
+      
+      <!-- 转存历史日志弹窗 -->
+      <el-dialog
+        v-model="logDialogVisible"
+        :title="`转存日志 - ${logTaskName}`"
+        width="780px"
+        top="6vh"
+        append-to-body
+      >
+        <el-empty v-if="logHistory.length === 0" description="暂无转存记录（点一次“立即执行”就会生成）" :image-size="80" />
+        <div v-else class="run-history-list">
+          <div v-for="(h, idx) in logHistory" :key="idx" class="run-card">
+            <div class="run-card-head">
+              <div class="run-card-headline">
+                <el-tag :type="h.success ? 'success' : 'danger'" size="small" effect="light">
+                  {{ h.success ? '成功' : '失败' }}
+                </el-tag>
+                <span class="run-card-time">{{ h.start_time || '-' }} → {{ h.end_time || '-' }}</span>
+              </div>
+              <el-button link type="primary" size="small" @click="showHistoryDetail(h)">详情</el-button>
+            </div>
+            <div class="run-card-stats">
+              <span class="run-chip run-chip-ok">转存 {{ h.file_count || 0 }} 个</span>
+              <span class="run-chip">分享 {{ h.total_count || 0 }} 个</span>
+              <span class="run-chip">排除 {{ h.excluded_count || 0 }}</span>
+              <span class="run-chip">正则未命中 {{ h.filtered_count || 0 }}</span>
+              <span class="run-chip">MD5 跳过 {{ h.md5_skipped || 0 }}</span>
+            </div>
+            <div class="run-card-path" :title="h.save_dir || h.compare_dir || ''">
+              <el-icon><Folder /></el-icon>
+              <span>转存到：{{ h.save_dir || '（旧记录未存路径，新记录会显示）' }}</span>
+            </div>
+            <div v-if="h.message" class="run-card-message">{{ h.message }}</div>
+          </div>
+        </div>
+      </el-dialog>
+
+      <!-- 历史详情弹窗 -->
+      <el-dialog
+        v-model="historyDetailVisible"
+        title="转存记录详情"
+        width="820px"
+        top="5vh"
+        append-to-body
+      >
+        <div v-if="historyDetail" class="hd-content">
+          <div class="hd-section hd-section-info">
+            <h3 class="hd-section-title">执行信息</h3>
+            <div class="hd-info-grid">
+              <div class="hd-info-item">
+                <span class="hd-label">开始时间</span>
+                <span class="hd-value">{{ historyDetail.start_time || '-' }}</span>
+              </div>
+              <div class="hd-info-item">
+                <span class="hd-label">结束时间</span>
+                <span class="hd-value">{{ historyDetail.end_time || '-' }}</span>
+              </div>
+              <div class="hd-info-item">
+                <span class="hd-label">耗时</span>
+                <span class="hd-value">{{ historyDuration(historyDetail) }}</span>
+              </div>
+              <div class="hd-info-item">
+                <span class="hd-label">执行结果</span>
+                <span class="hd-value">
+                  <el-tag :type="historyDetail.success ? 'success' : 'danger'" size="small" effect="light">
+                    {{ historyDetail.success ? '成功' : '失败' }}
+                  </el-tag>
+                </span>
+              </div>
+              <div class="hd-info-item hd-span-2">
+                <span class="hd-label">转存路径</span>
+                <span class="hd-value hd-path">{{ historyDetail.save_dir || '（旧记录未存路径）' }}</span>
+              </div>
+              <div class="hd-info-item hd-span-2">
+                <span class="hd-label">对比路径</span>
+                <span class="hd-value hd-path">{{ historyDetail.compare_dir || historyDetail.save_dir || '（旧记录未存路径）' }}</span>
+              </div>
+              <div class="hd-info-item hd-span-2">
+                <span class="hd-label">转存文件夹</span>
+                <span class="hd-value hd-path">{{ historyFolderNames || '（未选择，按整条链接转存）' }}</span>
+              </div>
+              <div class="hd-info-item">
+                <span class="hd-label">包含子目录</span>
+                <span class="hd-value">{{ historySubdirsText }}</span>
+              </div>
+              <div class="hd-info-item">
+                <span class="hd-label">保存文件夹</span>
+                <span class="hd-value">{{ historyDetail.keep_folder ? '是（连文件夹一起存）' : '否（只存里面的内容）' }}</span>
+              </div>
+              <div class="hd-info-item hd-span-2">
+                <span class="hd-label">文件过滤</span>
+                <span class="hd-value hd-path">{{ historyDetail.regex_pattern || '（未设置正则，全部转存）' }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="hd-section">
+            <h3 class="hd-section-title">执行结果</h3>
+            <div class="hd-result-box">
+              <div class="hd-result-message">{{ historyDetail.message || '无消息' }}</div>
+              <div class="hd-stat-row">
+                <div class="hd-stat">
+                  <div class="hd-stat-value">{{ historyDetail.total_count || 0 }}</div>
+                  <div class="hd-stat-label">分享文件</div>
+                </div>
+                <div class="hd-stat">
+                  <div class="hd-stat-value hd-warn">{{ historyDetail.excluded_count || 0 }}</div>
+                  <div class="hd-stat-label">排除清单跳过</div>
+                </div>
+                <div class="hd-stat">
+                  <div class="hd-stat-value">{{ historyDetail.filtered_count || 0 }}</div>
+                  <div class="hd-stat-label">正则未命中</div>
+                </div>
+                <div class="hd-stat">
+                  <div class="hd-stat-value">{{ historyDetail.md5_skipped || 0 }}</div>
+                  <div class="hd-stat-label">MD5 命中跳过</div>
+                </div>
+                <div class="hd-stat">
+                  <div class="hd-stat-value hd-ok">{{ historyDetail.file_count || 0 }}</div>
+                  <div class="hd-stat-label">本次转存</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="hd-section">
+            <h3 class="hd-section-title">
+              正则过滤后的文件（{{ regexPassedFiles.length }}）
+              <span v-if="regexMatchedExcludedCount > 0" class="hd-section-hint">
+                其中 {{ regexMatchedExcludedCount }} 个在下面的排除清单里
+              </span>
+            </h3>
+            <div v-if="regexPassedFiles.length" class="hd-files">
+              <div v-for="(f, i) in regexPassedFiles" :key="'p' + i" class="hd-file-item">
+                <el-icon class="hd-file-icon hd-icon-ok"><Document /></el-icon>
+                <span class="hd-file-name">{{ f }}</span>
+              </div>
+            </div>
+            <div v-else class="hd-empty">没有文件命中过滤正则（正则未命中 {{ historyDetail.filtered_count || 0 }} 个）</div>
+          </div>
+
+          <div v-if="historyDetail.excluded_files && historyDetail.excluded_files.length" class="hd-section">
+            <h3 class="hd-section-title">排除文件（{{ historyDetail.excluded_files.length }}，本次不转存）</h3>
+            <div class="hd-files">
+              <div v-for="(f, i) in historyDetail.excluded_files" :key="'e' + i" class="hd-file-item">
+                <el-icon class="hd-file-icon hd-icon-warn"><Remove /></el-icon>
+                <span class="hd-file-name">{{ f }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="hd-section">
+            <h3 class="hd-section-title">本次实际转存（{{ historyDetail.file_count || 0 }}）</h3>
+            <div v-if="historyDetail.transferred_files && historyDetail.transferred_files.length" class="hd-files">
+              <div v-for="(f, i) in historyDetail.transferred_files" :key="'t' + i" class="hd-file-item">
+                <el-icon class="hd-file-icon"><Document /></el-icon>
+                <span class="hd-file-name">{{ typeof f === 'string' ? f : (f.path || f.name || '') }}</span>
+              </div>
+            </div>
+            <div v-else class="hd-empty">本次没有文件被转存（被排除清单 / MD5 去重 / 同名已存在拦住）</div>
+          </div>
+
+          <div class="hd-section hd-logs-section">
+            <h3 class="hd-section-title">执行日志（{{ historyLogEntries.length }} 行）</h3>
+            <div class="hd-logs">
+              <div v-if="historyLogEntries.length === 0" class="hd-no-logs">暂无日志</div>
+              <div v-for="(log, i) in historyLogEntries" :key="i" class="hd-log-entry">
+                <span class="hd-log-level" :class="'hd-level-' + String(log.level).toLowerCase()">{{ log.level }}</span>
+                <span class="hd-log-message">{{ log.message }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-dialog>
+      
+      <!-- 排除文件弹窗 -->
+      <el-dialog
+        v-model="excludeDialogVisible"
+        title="排除文件（后续转存时跳过）"
+        width="640px"
+        append-to-body
+      >
+        <div v-if="excludeLoading" class="folder-loading">正在读取分享文件并按过滤规则筛选…</div>
+        <template v-else>
+          <div class="exclude-tip">
+            <span>勾选 = 后续转存时跳过该文件（按分享内路径匹配；若你在网盘里改了名，需要重新勾选）</span>
+            <el-button
+              size="small"
+              type="warning"
+              plain
+              :disabled="excludeCandidates.length === 0"
+              @click="selectAllNoMd5"
+            >
+              一键勾选无MD5文件
+            </el-button>
+          </div>
+          <el-empty v-if="excludeCandidates.length === 0" description="没有可转存的文件（可能已被正则全部过滤）" :image-size="70" />
+          <el-checkbox-group v-else v-model="excludeSelection" class="exclude-list">
+            <div v-for="f in excludeCandidates" :key="f.path" class="folder-item">
+              <el-checkbox :label="f.path">
+                {{ f.path }}
+                <span class="exclude-size">（{{ formatExcludeSize(f.size) }}）</span>
+              </el-checkbox>
+            </div>
+          </el-checkbox-group>
+        </template>
+        <template #footer>
+          <el-button @click="excludeDialogVisible = false">取消</el-button>
+          <el-button type="primary" :loading="excludeSaving" @click="saveExcludes">保存排除清单</el-button>
+        </template>
+      </el-dialog>
       
       <!-- 移动端卡片布局 -->
       <div class="mobile-cards" v-loading="loading">
@@ -377,7 +611,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { 
   Plus, Search, VideoPlay, Delete, Edit, Share, 
-  Link, CopyDocument, DCaret, Sort, Setting
+  Link, CopyDocument, DCaret, Sort, Setting, Document, Remove, Folder
 } from '@element-plus/icons-vue'
 import { storeToRefs } from 'pinia'
 import { useTaskStore } from '@/stores/tasks'
@@ -385,6 +619,7 @@ import { useTasks } from '@/composables/useTasks'
 import AddTaskDialog from '@/components/business/AddTaskDialog.vue'
 import TaskRunnerDialog from '@/components/business/TaskRunnerDialog.vue'
 import type { Task } from '@/types'
+import { apiService } from '@/services/api'
 import { getTaskStatusText } from '@/utils/helpers'
 import Sortable from 'sortablejs'
 
@@ -509,6 +744,238 @@ const saveColumnSettings = () => {
 
 const handleSelectionChange = (selection: Task[]) => {
   selectedTasks.value = selection
+}
+
+// 修改: 表格渲染完成后强制重算布局，避免刷新页面时列宽算错（列是逐个挂载的）
+const relayoutTable = () => {
+  nextTick(() => {
+    try {
+      tableRef.value?.doLayout()
+    } catch {
+      // 表格还没就绪时忽略
+    }
+  })
+}
+
+onMounted(() => {
+  relayoutTable()
+  window.addEventListener('resize', relayoutTable)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', relayoutTable)
+})
+
+watch(() => tasks.value?.length, relayoutTable)
+watch(columnVisible, relayoutTable, { deep: true })
+watch(() => loading.value, relayoutTable)
+
+// 排除文件
+const excludeDialogVisible = ref(false)
+const excludeLoading = ref(false)
+const excludeSaving = ref(false)
+const excludeCandidates = ref<{ path: string; size: number; md5?: string }[]>([])
+const excludeSelection = ref<string[]>([])
+let excludeTask: Task | null = null
+
+const formatExcludeSize = (size?: number) => {
+  if (!size || size <= 0) return '未知大小'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let v = size
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+const selectAllNoMd5 = async () => {
+  const noMd5 = excludeCandidates.value
+    .filter((f) => !f.md5)
+    .map((f) => f.path)
+  if (noMd5.length === 0) {
+    ElMessage.info('所有文件都有 MD5，无需勾选')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `共 ${noMd5.length} 个文件没有 MD5 信息，确定全部勾选为排除？`,
+      '一键勾选无MD5文件',
+      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  const merged = new Set(excludeSelection.value)
+  noMd5.forEach((p) => merged.add(p))
+  excludeSelection.value = Array.from(merged)
+  ElMessage.success(`已勾选 ${noMd5.length} 个无MD5文件`)
+}
+
+const historyDetailVisible = ref(false)
+const historyDetail = ref<any>(null)
+
+const showHistoryDetail = (h: any) => {
+  historyDetail.value = h
+  historyDetailVisible.value = true
+}
+
+const regexPassedFiles = computed(() => {
+  if (!historyDetail.value) return []
+  const matched = historyDetail.value.regex_matched_files
+  if (Array.isArray(matched)) return matched
+  const legacy = historyDetail.value.regex_passed_files
+  return Array.isArray(legacy) ? legacy : []
+})
+
+// 规则命中的文件里，有多少被排除清单拦下了
+const regexMatchedExcludedCount = computed(() => {
+  const excl = new Set(
+    ((historyDetail.value && historyDetail.value.excluded_files) || []).map((f: string) =>
+      String(f).split('/').filter(Boolean).pop() || f
+    )
+  )
+  return regexPassedFiles.value.filter((f: string) => {
+    const short = String(f).split('/').filter(Boolean).pop() || f
+    return excl.has(short)
+  }).length
+})
+
+const historyFolderNames = computed(() => {
+  const list = historyDetail.value && historyDetail.value.transfer_folders
+  if (!Array.isArray(list) || list.length === 0) return ''
+  return list
+    .map((p: string) => String(p).split('/').filter(Boolean).pop() || p)
+    .join('、')
+})
+
+const historySubdirsText = computed(() => {
+  const v = historyDetail.value ? historyDetail.value.include_subdirs : undefined
+  if (v === undefined || v === null || v === '') return '是（默认）'
+  return v ? '是（连子文件夹一起存）' : '否（只存该文件夹下的文件）'
+})
+
+// 历史日志解析：兼容 "[INFO] xxx" 字符串与结构化对象
+const historyLogEntries = computed(() => {
+  const raw = (historyDetail.value && historyDetail.value.logs) || []
+  return raw.map((line: any) => {
+    if (line && typeof line === 'object') {
+      return {
+        level: line.level || 'INFO',
+        message: line.message || '',
+        time: line.timestamp || ''
+      }
+    }
+    const text = String(line == null ? '' : line)
+    const m = /^\[([A-Za-z]+)\]\s*(.*)$/.exec(text)
+    return { level: m ? m[1] : 'INFO', message: m ? m[2] : text, time: '' }
+  })
+})
+
+const historyDuration = (h: any) => {
+  if (!h || !h.start_time || !h.end_time) return '-'
+  const s = new Date(h.start_time.replace(/-/g, '/')).getTime()
+  const e = new Date(h.end_time.replace(/-/g, '/')).getTime()
+  if (!s || !e || e < s) return '-'
+  const sec = Math.round((e - s) / 1000)
+  if (sec < 60) return `${sec} 秒`
+  return `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`
+}
+
+const openExcludeDialog = async (task: Task) => {
+  excludeTask = task
+  excludeDialogVisible.value = true
+  excludeLoading.value = true
+  excludeCandidates.value = []
+  excludeSelection.value = []
+  try {
+    const pwdMatch = /(?:[?&])pwd=([^&]+)/.exec(task.url || '')
+    const res = await apiService.getFilteredShareFiles({
+      url: task.url,
+      pwd: pwdMatch ? pwdMatch[1] : (task.pwd || ''),
+      task_id: task.order - 1
+    })
+    if (res.success) {
+      excludeCandidates.value = ((res as any).files || []) as { path: string; size: number }[]
+      const existing = ((res as any).excluded || []) as string[]
+      const candPaths = new Set(excludeCandidates.value.map((f) => f.path))
+      excludeSelection.value = existing.filter((p) => candPaths.has(p))
+    } else {
+      ElMessage.error((res as any).message || '读取分享文件失败')
+      excludeDialogVisible.value = false
+    }
+  } catch {
+    ElMessage.error('读取分享文件失败（链接可能已失效）')
+    excludeDialogVisible.value = false
+  } finally {
+    excludeLoading.value = false
+  }
+}
+
+const saveExcludes = async () => {
+  if (!excludeTask) return
+  excludeSaving.value = true
+  try {
+    const existing = (excludeTask.exclude_files || []) as string[]
+    const candPaths = new Set(excludeCandidates.value.map((f) => f.path))
+    const selected = new Set(excludeSelection.value)
+    // 保留不在当前候选列表里的旧排除项，再合并新勾选
+    const merged = Array.from(new Set([...existing.filter((p) => !candPaths.has(p)), ...selected]))
+    const res = await apiService.setTaskExcludes(excludeTask.order - 1, merged)
+    if (res.success) {
+      ElMessage.success((res as any).message || '已保存')
+      excludeDialogVisible.value = false
+      await fetchTasks()
+    } else {
+      ElMessage.error((res as any).message || '保存失败')
+    }
+  } catch {
+    ElMessage.error('保存失败')
+  } finally {
+    excludeSaving.value = false
+  }
+}
+
+const toggleTaskEnabled = async (task: Task) => {
+  try {
+    const res = await apiService.toggleTask(task.order - 1)
+    if (res.success) {
+      ElMessage.success(res.message || '操作成功')
+      await fetchTasks()
+    } else {
+      ElMessage.error(res.message || '操作失败')
+    }
+  } catch {
+    ElMessage.error('操作失败')
+  }
+}
+
+// 转存历史日志
+const logDialogVisible = ref(false)
+const logTaskName = ref('')
+const logHistory = ref<any[]>([])
+
+const historyStatusText = (s: string) => {
+  const map: Record<string, string> = {
+    success: '转存成功',
+    failed: '转存失败',
+    error: '转存失败',
+    skipped: '无新文件'
+  }
+  return map[s] || s
+}
+
+const openTaskLog = async (task: Task) => {
+  logTaskName.value = task.name || '未命名任务'
+  logDialogVisible.value = true
+  logHistory.value = []
+  try {
+    const res = await apiService.getTaskHistory(task.order - 1)
+    logHistory.value = ((res as any).history || []) as any[]
+  } catch {
+    ElMessage.error('获取转存日志失败')
+  }
 }
 
 const executeTask = async (taskId: number) => {
@@ -866,50 +1333,8 @@ watch([searchQuery, statusFilter, categoryFilter, isReversed], async () => {
   width: 100%;
 }
 
-/* 通过 colgroup > col 设置列宽百分比 */
-.desktop-table :deep(colgroup col[name="el-table_1_column_1"]) {
-  width: 3% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_2"]) {
-  width: 3% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_3"]) {
-  width: 3% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_4"]) {
-  width: 9% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_5"]) {
-  width: 25% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_6"]) {
-  width: 14% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_7"]) {
-  width: 6% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_8"]) {
-  width: 14% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_9"]) {
-  width: 7% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_10"]) {
-  width: 5% !important;
-}
-
-.desktop-table :deep(colgroup col[name="el-table_1_column_11"]) {
-  width: 11% !important;
-}
+/* 修改: 原先按 colgroup 第 N 列写死百分比宽度，刷新时列注册顺序变化会导致对号错位
+   （任务名称被分到 3% 挤成竖排）。改为完全使用 el-table-column 的 width / min-width。 */
 
 .task-name {
   font-weight: 500;
@@ -1309,5 +1734,425 @@ watch([searchQuery, statusFilter, categoryFilter, isReversed], async () => {
     align-items: center;
     justify-content: center;
   }
+}
+/* 转存历史日志 */
+.log-status {
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.log-message {
+  color: #606266;
+  font-size: 13px;
+}
+
+.log-files {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.log-files li {
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+/* ===== 转存日志列表（卡片式） ===== */
+.run-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 68vh;
+  overflow-y: auto;
+}
+
+.run-card {
+  padding: 14px 16px;
+  background: #f8f9fa;
+  border: 1px solid #e4e7ed;
+  border-radius: 10px;
+}
+
+.run-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.run-card-headline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.run-card-time {
+  font-size: 13px;
+  color: #606266;
+  font-family: 'Courier New', monospace;
+}
+
+.run-card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.run-chip {
+  font-size: 12px;
+  color: #606266;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 12px;
+  padding: 2px 10px;
+}
+
+.run-chip-ok {
+  color: #67c23a;
+  border-color: #c2e7b0;
+  background: #f0f9eb;
+}
+
+.run-card-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #409eff;
+  word-break: break-all;
+}
+
+.run-card-message {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #303133;
+}
+
+/* ===== 详情弹窗（对齐执行监控风格） ===== */
+.hd-content {
+  max-height: 70vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.hd-section {
+  margin-bottom: 22px;
+}
+
+.hd-section-info {
+  padding: 16px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.hd-section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+  margin: 0 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hd-section-hint {
+  font-size: 12px;
+  font-weight: 400;
+  color: #e6a23c;
+  background: #fdf6ec;
+  border: 1px solid #f5dab1;
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+
+.hd-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.hd-info-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hd-span-2 {
+  grid-column: 1 / -1;
+}
+
+.hd-label {
+  font-weight: 500;
+  color: #606266;
+  min-width: 70px;
+  flex-shrink: 0;
+}
+
+.hd-value {
+  color: #303133;
+  word-break: break-all;
+}
+
+.hd-path {
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  color: #409eff;
+}
+
+.hd-result-box {
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+}
+
+.hd-result-message {
+  font-size: 14px;
+  color: #303133;
+  font-weight: 500;
+  margin-bottom: 14px;
+  word-break: break-all;
+}
+
+.hd-stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 10px;
+}
+
+.hd-stat {
+  text-align: center;
+  padding: 10px 6px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.hd-stat-value {
+  font-size: 20px;
+  font-weight: 600;
+  color: #303133;
+  line-height: 1.2;
+}
+
+.hd-stat-value.hd-warn {
+  color: #e6a23c;
+}
+
+.hd-stat-value.hd-ok {
+  color: #67c23a;
+}
+
+.hd-stat-label {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.hd-files {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.hd-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f5f7fa;
+}
+
+.hd-file-item:last-child {
+  border-bottom: none;
+}
+
+.hd-file-icon {
+  color: #409eff;
+  flex-shrink: 0;
+}
+
+.hd-file-icon.hd-icon-warn {
+  color: #e6a23c;
+}
+
+.hd-file-icon.hd-icon-ok {
+  color: #67c23a;
+}
+
+.hd-file-name {
+  flex: 1;
+  font-size: 14px;
+  color: #303133;
+  word-break: break-all;
+}
+
+.hd-empty {
+  padding: 18px;
+  text-align: center;
+  font-size: 13px;
+  color: #909399;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.hd-logs {
+  height: 220px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  background: #f8f9fa;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.hd-no-logs {
+  text-align: center;
+  color: #909399;
+  padding: 40px 0;
+}
+
+.hd-log-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+
+.hd-log-entry:hover {
+  background: #eef1f6;
+}
+
+.hd-log-level {
+  flex-shrink: 0;
+  min-width: 48px;
+  font-weight: 600;
+  color: #909399;
+}
+
+.hd-level-error, .hd-level-failed {
+  color: #f56c6c;
+}
+
+.hd-level-warning, .hd-level-warn {
+  color: #e6a23c;
+}
+
+.hd-level-success {
+  color: #67c23a;
+}
+
+.hd-level-info {
+  color: #409eff;
+}
+
+.hd-log-message {
+  flex: 1;
+  color: #303133;
+  word-break: break-all;
+}
+/* 操作列按钮两行排布 */
+.action-buttons {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+/* 转存历史列表 */
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-item {
+  padding: 10px 14px;
+  background: #f5f7fa;
+  border-radius: 8px;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.history-time {
+  font-size: 13px;
+  color: #606266;
+}
+
+.history-count {
+  font-size: 13px;
+  color: #303133;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 16px;
+  font-size: 13px;
+  color: #303133;
+  margin-bottom: 10px;
+}
+
+.detail-block {
+  margin-top: 12px;
+}
+
+.detail-block h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #606266;
+}
+
+.detail-logs {
+  max-height: 260px;
+  overflow-y: auto;
+  background: #f5f7fa;
+  padding: 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+/* 排除文件 */
+.exclude-tip {
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  background: #fdf6ec;
+  color: #e6a23c;
+  font-size: 13px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.exclude-list {
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.exclude-size {
+  color: #909399;
+  font-size: 12px;
 }
 </style>

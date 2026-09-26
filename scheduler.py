@@ -278,6 +278,10 @@ class TaskScheduler:
             
             for task in tasks:
                 try:
+                    if not task.get('enabled', True):
+                        logger.info(f"任务已停用，跳过: {task.get('name', task['url'])}")
+                        results['skipped'].append(task)
+                        continue
                     task_name = task.get('name', task['url'])
                     logger.info(f"--- 开始处理任务: {task_name} ---")
                     
@@ -526,6 +530,68 @@ class TaskScheduler:
             logger.error(f"更新任务状态失败: {str(e)}")
 
     def _execute_single_task(self, task):
+        """执行单个任务（带历史记录）"""
+        return self._execute_single_task_with_history(task)
+
+    def _execute_single_task_with_history(self, task):
+        """包装器：记录开始/结束/统计/日志到 SQLite 历史"""
+        start_time = time.strftime('%Y-%m-%d %H:%M:%S')
+        started_ok = False
+        error_msg = ''
+        self._current_run_logs = []
+        try:
+            started_ok = bool(self._execute_single_task_inner(task))
+        except Exception as e:
+            error_msg = str(e)
+            started_ok = False
+        finally:
+            try:
+                from history_db import record_task_history
+                order = (task or {}).get('order')
+                stats = {}
+                if hasattr(self, 'storage') and hasattr(self.storage, '_transfer_stats'):
+                    stats = self.storage._transfer_stats.pop(order, {}) or {}
+                current = next(
+                    (t for t in self.storage.config.get('baidu', {}).get('tasks', []) if t.get('order') == order),
+                    {},
+                )
+                transferred = list(stats.get('transferred_files') or [])
+                record = {
+                    'start_time': start_time,
+                    'end_time': time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'success': bool(started_ok),
+                    'message': current.get('message', '') or error_msg,
+                    'file_count': len(transferred),
+                    'transferred_files': transferred,
+                    'excluded_files': stats.get('excluded_files_list') or list((task or {}).get('exclude_files') or []),
+                    'regex_passed_files': list(stats.get('regex_passed_files') or []),
+                    'regex_matched_files': list(stats.get('regex_matched_files') or []),
+                    'save_dir': stats.get('save_dir') or current.get('save_dir') or '',
+                    'compare_dir': stats.get('compare_dir') or current.get('compare_path') or current.get('save_dir') or '',
+                    'transfer_folders': list(stats.get('transfer_folders') or ((task or {}).get('transfer_folders') or [])),
+                    'include_subdirs': stats.get('include_subdirs', (task or {}).get('include_subdirs', True)),
+                    'keep_folder': stats.get('keep_folder', bool((task or {}).get('keep_folder'))),
+                    'regex_pattern': stats.get('regex_pattern') or (task or {}).get('regex_pattern') or '',
+                    'total_count': stats.get('total', 0),
+                    'excluded_count': stats.get('excluded', 0),
+                    'filtered_count': stats.get('filtered', 0),
+                    'md5_skipped': stats.get('md5_skipped', 0),
+                    'logs': list(getattr(self, '_current_run_logs', [])),
+                }
+                record_task_history(task_uid=(task or {}).get('task_uid'), order=order, record=record, keep=10)
+                # 修改: 转存到新文件后自动触发 QMediaSync 刮削
+                try:
+                    from qms_client import trigger_after_transfer as _qms_trigger
+                    _qms_msg = _qms_trigger(self.storage, current, len(transferred))
+                    if _qms_msg:
+                        logger.info(f"QMediaSync: {_qms_msg}")
+                except Exception as _qms_err:
+                    logger.error(f"触发 QMediaSync 失败: {_qms_err}")
+            except Exception as rec_err:
+                logger.error(f"记录转存历史失败: {rec_err}")
+        return started_ok
+
+    def _execute_single_task_inner(self, task):
         """执行单个任务
         Args:
             task: 任务配置
@@ -548,6 +614,10 @@ class TaskScheduler:
             if not current_task:
                 lookup = f"task_uid={task_uid}" if task_uid else f"order={task_order}"
                 logger.error(f"未找到任务: {lookup}")
+                return False
+
+            if not current_task.get('enabled', True):
+                logger.info(f"任务已停用，跳过执行: {current_task.get('name', current_task.get('url', '未知任务'))}")
                 return False
 
             task_order = current_task.get('order')
@@ -580,6 +650,10 @@ class TaskScheduler:
             # 使用最新的任务信息执行
             def progress_callback(status, message):
                 logger.info(f"[{task_name}] {status}: {message}")
+                try:
+                    self._current_run_logs.append(f"[{status}] {message}")
+                except Exception:
+                    pass
                 if status == 'info' and message.startswith('添加文件:'):
                     file_path = message.replace('添加文件:', '').strip()
                     if task_id not in results['transferred_files']:
@@ -636,6 +710,12 @@ class TaskScheduler:
                 if results['success'] or results['failed']:
                     self._add_to_notification_buffer(results)
                 
+                try:
+                    self.storage._transfer_stats.setdefault(task_order, {}).update({
+                        'transferred_files': result.get('transferred_files', []) or [],
+                    })
+                except Exception:
+                    pass
                 return result.get('success', False)
                 
             except Exception as e:

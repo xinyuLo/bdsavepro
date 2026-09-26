@@ -8,7 +8,7 @@
     <div class="dashboard-content">
       <!-- 统计卡片 -->
       <div class="stats-grid">
-        <div class="stat-card">
+        <div class="stat-card stat-clickable" @click="goToTasks">
           <div class="stat-icon">
             <el-icon size="24"><List /></el-icon>
           </div>
@@ -17,8 +17,8 @@
             <div class="stat-label">总任务数</div>
           </div>
         </div>
-        
-        <div class="stat-card">
+
+        <div class="stat-card stat-clickable" @click="goToTasks">
           <div class="stat-icon running">
             <el-icon size="24"><Loading /></el-icon>
           </div>
@@ -27,7 +27,7 @@
             <div class="stat-label">运行中</div>
           </div>
         </div>
-        
+
         <div class="stat-card">
           <div class="stat-icon success">
             <el-icon size="24"><Check /></el-icon>
@@ -37,7 +37,7 @@
             <div class="stat-label">已完成</div>
           </div>
         </div>
-        
+
         <div class="stat-card">
           <div class="stat-icon error">
             <el-icon size="24"><Close /></el-icon>
@@ -60,7 +60,7 @@
               <p>查看和管理所有转存任务</p>
             </div>
           </el-card>
-          
+
           <el-card class="action-card" shadow="hover" @click="goToUsers">
             <div class="action-content">
               <el-icon size="32"><User /></el-icon>
@@ -68,7 +68,7 @@
               <p>管理百度网盘用户账户</p>
             </div>
           </el-card>
-          
+
           <el-card class="action-card" shadow="hover" @click="goToSettings">
             <div class="action-content">
               <el-icon size="32"><Setting /></el-icon>
@@ -79,35 +79,21 @@
         </div>
       </div>
 
-      <!-- 系统信息 -->
+      <!-- 已启用任务 -->
       <div class="system-info">
-        <h2 class="section-title">系统信息</h2>
+        <h2 class="section-title">
+          已启用任务
+          <span v-if="enabledTasks.length > 0" class="section-badge">{{ enabledTasks.length }}</span>
+        </h2>
         <el-card>
-          <div class="info-grid">
-            <div class="info-item">
-              <span class="info-label">当前版本</span>
-              <span class="info-value">{{ APP_VERSION }}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">当前用户</span>
-              <span class="info-value">{{ currentUser || '未知' }}</span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">轮询状态</span>
-              <span class="info-value" :class="pollingStatus ? 'status-active' : 'status-inactive'">
-                {{ pollingStatus ? '运行中' : '已停止' }}
-              </span>
-            </div>
-            <div class="info-item">
-              <span class="info-label">最新版本</span>
-              <span class="info-value">
-                {{ latestVersion || '检查中...' }}
-                <el-tag v-if="hasUpdate" type="warning" size="small" style="margin-left: 8px">
-                  有更新
-                </el-tag>
-              </span>
-            </div>
-          </div>
+          <ul v-if="enabledTasks.length > 0" class="running-list">
+            <li v-for="task in enabledTasks" :key="task.order" class="running-item">
+              <span class="running-dot" :class="{ 'dot-active': task.status === 'running' }"></span>
+              <span class="running-name" :title="task.name">{{ task.name || '未命名任务' }}</span>
+              <span class="running-status" :class="'st-' + (task.status || 'normal')">{{ statusText(task.status) }}</span>
+            </li>
+          </ul>
+          <div v-else class="no-running">没有启用的任务，去「任务管理」打开开关</div>
         </el-card>
       </div>
     </div>
@@ -115,7 +101,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useTaskStore, useUserStore, useVersionStore } from '@/stores'
@@ -128,12 +114,30 @@ const userStore = useUserStore()
 const versionStore = useVersionStore()
 
 // 解构store数据
-const { taskStats } = storeToRefs(taskStore)
+const { taskStats, tasks } = storeToRefs(taskStore)
 const { currentUser } = storeToRefs(userStore)
 const { latestVersion, hasUpdate } = storeToRefs(versionStore)
 
 // 轮询状态
 const { isRunning: pollingStatus } = usePolling()
+
+// 已启用的任务（停用的不显示）
+const enabledTasks = computed(() =>
+  (tasks.value || []).filter((task) => task.enabled !== false)
+)
+
+const statusText = (s?: string) => {
+  const map: Record<string, string> = {
+    running: '运行中',
+    normal: '正常',
+    success: '成功',
+    error: '失败',
+    failed: '失败',
+    skipped: '无新文件',
+    pending: '等待中'
+  }
+  return map[s || ''] || s || '未知'
+}
 
 // 导航方法
 const goToTasks = () => router.push('/tasks')
@@ -143,7 +147,7 @@ const goToSettings = () => router.push('/settings')
 onMounted(async () => {
   // 获取任务统计数据
   await taskStore.fetchTasks()
-  
+
   // 获取用户信息
   await userStore.fetchUsers()
 })
@@ -202,6 +206,15 @@ onMounted(async () => {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
 
+/* 可点击卡片 */
+.stat-card.stat-clickable {
+  cursor: pointer;
+}
+
+.stat-card.stat-clickable:hover {
+  box-shadow: 0 6px 18px rgba(64, 158, 255, 0.25);
+}
+
 .stat-icon {
   width: 48px;
   height: 48px;
@@ -256,6 +269,21 @@ onMounted(async () => {
   margin-bottom: 20px;
 }
 
+.section-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 8px;
+  min-width: 20px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background-color: #409eff;
+  border-radius: 10px;
+}
+
 .action-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -302,6 +330,86 @@ onMounted(async () => {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
+/* 任务列表 */
+.running-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.running-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: #f5f7fa;
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.running-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #67c23a;
+  flex-shrink: 0;
+}
+
+.running-dot.dot-active {
+  background: #e6a23c;
+  animation: runningPulse 1.2s ease-in-out infinite;
+}
+
+.running-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+  color: #303133;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.running-status {
+  font-size: 12px;
+  flex-shrink: 0;
+  color: #909399;
+}
+
+.running-status.st-normal,
+.running-status.st-success {
+  color: #67c23a;
+}
+
+.running-status.st-running {
+  color: #e6a23c;
+}
+
+.running-status.st-error,
+.running-status.st-failed {
+  color: #f56c6c;
+}
+
+.no-running {
+  padding: 20px 0;
+  text-align: center;
+  color: #909399;
+  font-size: 14px;
+}
+
+@keyframes runningPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
 .info-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -344,16 +452,16 @@ onMounted(async () => {
   .dashboard {
     padding: 16px;
   }
-  
+
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
     gap: 16px;
   }
-  
+
   .action-grid {
     grid-template-columns: 1fr;
   }
-  
+
   .info-grid {
     grid-template-columns: 1fr;
   }
@@ -363,16 +471,16 @@ onMounted(async () => {
   .dashboard {
     padding: 12px;
   }
-  
+
   .stats-grid {
     grid-template-columns: 1fr;
     gap: 12px;
   }
-  
+
   .stat-card {
     padding: 16px;
   }
-  
+
   .page-title {
     font-size: 24px;
   }
