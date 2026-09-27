@@ -41,7 +41,7 @@ export class ApiService {
     return httpClient.post('/api/share/folders', data)
   }
 
-  async getFilteredShareFiles(data: { url: string; pwd?: string; task_id: number }): Promise<ApiResponse<any>> {
+  async getFilteredShareFiles(data: { url: string; pwd?: string; task_id: number; refresh?: boolean }): Promise<ApiResponse<any>> {
     return httpClient.post('/api/share/filtered-files', data)
   }
 

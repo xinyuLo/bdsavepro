@@ -420,20 +420,27 @@
         width="640px"
         append-to-body
       >
-        <div v-if="excludeLoading" class="folder-loading">正在读取分享文件并按过滤规则筛选…</div>
+        <div v-if="excludeLoading && excludeCandidates.length === 0" class="folder-loading">正在读取分享文件并按过滤规则筛选…</div>
         <template v-else>
           <div class="exclude-tip">
             <span>勾选 = 后续转存时跳过该文件（按分享内路径匹配；若你在网盘里改了名，需要重新勾选）</span>
-            <el-button
-              size="small"
-              type="warning"
-              plain
-              :disabled="excludeCandidates.length === 0"
-              @click="selectAllNoMd5"
-            >
-              一键勾选无MD5文件
-            </el-button>
+            <span class="exclude-tip-btns">
+              <el-button size="small" :loading="excludeRefreshing" @click="refreshExcludeList">
+                <el-icon><Refresh /></el-icon>
+                <span>刷新</span>
+              </el-button>
+              <el-button
+                size="small"
+                type="warning"
+                plain
+                :disabled="excludeCandidates.length === 0"
+                @click="selectAllNoMd5"
+              >
+                一键勾选无MD5文件
+              </el-button>
+            </span>
           </div>
+          <div v-if="excludeCached" class="exclude-cache-hint">当前为缓存列表，获取于 {{ excludeFetchedAt }}；网盘里有更新就点刷新</div>
           <el-empty v-if="excludeCandidates.length === 0" description="没有可转存的文件（可能已被正则全部过滤）" :image-size="70" />
           <el-checkbox-group v-else v-model="excludeSelection" class="exclude-list">
             <div v-for="f in excludeCandidates" :key="f.path" class="folder-item">
@@ -611,7 +618,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { 
   Plus, Search, VideoPlay, Delete, Edit, Share, 
-  Link, CopyDocument, DCaret, Sort, Setting, Document, Remove, Folder
+  Link, CopyDocument, DCaret, Sort, Setting, Document, Remove, Folder, Refresh
 } from '@element-plus/icons-vue'
 import { storeToRefs } from 'pinia'
 import { useTaskStore } from '@/stores/tasks'
@@ -773,7 +780,10 @@ watch(() => loading.value, relayoutTable)
 // 排除文件
 const excludeDialogVisible = ref(false)
 const excludeLoading = ref(false)
+const excludeRefreshing = ref(false)
 const excludeSaving = ref(false)
+const excludeCached = ref(false)
+const excludeFetchedAt = ref('')
 const excludeCandidates = ref<{ path: string; size: number; md5?: string }[]>([])
 const excludeSelection = ref<string[]>([])
 let excludeTask: Task | null = null
@@ -886,30 +896,46 @@ const historyDuration = (h: any) => {
 const openExcludeDialog = async (task: Task) => {
   excludeTask = task
   excludeDialogVisible.value = true
-  excludeLoading.value = true
-  excludeCandidates.value = []
-  excludeSelection.value = []
+  await loadExcludeList(task, false)
+}
+
+const refreshExcludeList = () => {
+  if (excludeTask) loadExcludeList(excludeTask, true)
+}
+
+const loadExcludeList = async (task: Task, refresh: boolean) => {
+  if (refresh) {
+    excludeRefreshing.value = true
+  } else {
+    excludeLoading.value = true
+    excludeCandidates.value = []
+    excludeSelection.value = []
+  }
   try {
     const pwdMatch = /(?:[?&])pwd=([^&]+)/.exec(task.url || '')
     const res = await apiService.getFilteredShareFiles({
       url: task.url,
       pwd: pwdMatch ? pwdMatch[1] : (task.pwd || ''),
-      task_id: task.order - 1
+      task_id: task.order - 1,
+      refresh
     })
     if (res.success) {
       excludeCandidates.value = ((res as any).files || []) as { path: string; size: number }[]
       const existing = ((res as any).excluded || []) as string[]
       const candPaths = new Set(excludeCandidates.value.map((f) => f.path))
       excludeSelection.value = existing.filter((p) => candPaths.has(p))
+      excludeCached.value = !!(res as any).cached
+      excludeFetchedAt.value = (res as any).fetched_at || ''
     } else {
       ElMessage.error((res as any).message || '读取分享文件失败')
-      excludeDialogVisible.value = false
+      if (!refresh) excludeDialogVisible.value = false
     }
   } catch {
     ElMessage.error('读取分享文件失败（链接可能已失效）')
-    excludeDialogVisible.value = false
+    if (!refresh) excludeDialogVisible.value = false
   } finally {
     excludeLoading.value = false
+    excludeRefreshing.value = false
   }
 }
 
@@ -2144,6 +2170,19 @@ watch([searchQuery, statusFilter, categoryFilter, isReversed], async () => {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.exclude-tip-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.exclude-cache-hint {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #909399;
 }
 
 .exclude-list {

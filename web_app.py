@@ -2097,6 +2097,9 @@ def list_share_folders():
             folders.append({'name': raw.rstrip('/').rsplit('/', 1)[-1] or raw, 'path': raw})
     return jsonify({'success': True, 'folders': folders})
 
+# xinyu: 分享文件清单缓存（链接 -> 原始文件列表 + 单根目录标志），最多 20 条，重启清空
+_SHARE_FILES_CACHE = {}
+
 @app.route('/api/share/filtered-files', methods=['POST'])
 @login_required
 @handle_api_error
@@ -2120,30 +2123,46 @@ def share_filtered_files():
 
     existing_excludes = list((task or {}).get('exclude_files') or [])
 
-    try:
-        storage._access_shared_with_retry(url, pwd)
-        shared_paths = storage._shared_paths_with_retry(shared_url=url)
-        if not shared_paths:
-            return jsonify({'success': False, 'message': '获取分享文件列表失败（链接可能已失效）'})
-        uk = shared_paths[0].uk
-        share_id = shared_paths[0].share_id
-        bdstoken = shared_paths[0].bdstoken
-        files = []
-        for p in shared_paths:
-            if getattr(p, 'is_dir', False):
-                files.extend(storage._list_shared_dir_files(p, uk, share_id, bdstoken))
-            else:
-                raw = str(getattr(p, 'path', '') or '')
-                files.append({
-                    'server_filename': raw.rstrip('/').rsplit('/', 1)[-1],
-                    'path': raw,
-                    'size': getattr(p, 'size', 0),
-                    'isdir': 0,
-                    'md5': str(getattr(p, 'md5', '') or '')
-                })
-    except Exception as e:
-        logger.error(f"读取分享文件失败: {str(e)}")
-        return jsonify({'success': False, 'message': f'读取失败（链接可能已失效）：{e}'})
+    # xinyu: 按链接读缓存（请求带 refresh=1 强制重拉）；正则与路径清理每次现算，不受缓存影响
+    refresh = bool(data.get('refresh'))
+    cached = _SHARE_FILES_CACHE.get(url)
+    single = False
+    if cached and not refresh:
+        files = cached['files']
+        single = cached['single']
+        from_cache = True
+    else:
+        try:
+            storage._access_shared_with_retry(url, pwd)
+            shared_paths = storage._shared_paths_with_retry(shared_url=url)
+            if not shared_paths:
+                return jsonify({'success': False, 'message': '获取分享文件列表失败（链接可能已失效）'})
+            uk = shared_paths[0].uk
+            share_id = shared_paths[0].share_id
+            bdstoken = shared_paths[0].bdstoken
+            files = []
+            for p in shared_paths:
+                if getattr(p, 'is_dir', False):
+                    files.extend(storage._list_shared_dir_files(p, uk, share_id, bdstoken))
+                else:
+                    raw = str(getattr(p, 'path', '') or '')
+                    files.append({
+                        'server_filename': raw.rstrip('/').rsplit('/', 1)[-1],
+                        'path': raw,
+                        'size': getattr(p, 'size', 0),
+                        'isdir': 0,
+                        'md5': str(getattr(p, 'md5', '') or '')
+                    })
+            single = (len(shared_paths) == 1 and bool(getattr(shared_paths[0], 'is_dir', False)))
+        except Exception as e:
+            logger.error(f"读取分享文件失败: {str(e)}")
+            return jsonify({'success': False, 'message': f'读取失败（链接可能已失效）：{e}'})
+        _SHARE_FILES_CACHE[url] = {'files': files, 'single': single, 'ts': time.time()}
+        if len(_SHARE_FILES_CACHE) > 20:
+            oldest = min(_SHARE_FILES_CACHE, key=lambda k: _SHARE_FILES_CACHE[k]['ts'])
+            _SHARE_FILES_CACHE.pop(oldest, None)
+        from_cache = False
+    fetched_at = time.strftime('%H:%M:%S', time.localtime(_SHARE_FILES_CACHE[url]['ts']))
 
     # 修改: 对齐转存时的路径清理（剥掉转存文件夹/单根目录层），再套正则，
     # 否则 ^ 开头的锚定正则会把带文件夹前缀的文件全部滤掉（30/31/32 集看不到的原因）
@@ -2152,7 +2171,7 @@ def share_filtered_files():
     strip_names = set()
     if selected_folders and not keep_folder:
         strip_names = {p.rsplit('/', 1)[-1] for p in selected_folders}
-    is_single_folder = (not selected_folders) and len(shared_paths) == 1 and bool(getattr(shared_paths[0], 'is_dir', False))
+    is_single_folder = (not selected_folders) and single
 
     candidates = []
     for f in files:
@@ -2176,7 +2195,9 @@ def share_filtered_files():
     return jsonify({
         'success': True,
         'files': candidates,
-        'excluded': existing_excludes
+        'excluded': existing_excludes,
+        'cached': from_cache,
+        'fetched_at': fetched_at
     })
 
 @app.route('/api/task/exclude', methods=['POST'])
